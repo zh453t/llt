@@ -1,0 +1,10 @@
+[package]
+name = "lltdb"
+version.workspace = true
+edition.workspace = true
+description = "路路通离线时刻表 SQLite 的只读查询层（gui 与 cli 共用）"
+publish = false
+
+[dependencies]
+jiff.workspace = true
+rusqlite.workspace = true

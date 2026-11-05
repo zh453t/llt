@@ -1,0 +1,13 @@
+[package]
+name = "llt-gui"
+version.workspace = true
+edition.workspace = true
+description = "路路通离线时刻表查询（egui）"
+publish = false
+
+[dependencies]
+eframe.workspace = true
+egui_extras.workspace = true
+jiff.workspace = true
+rusqlite.workspace = true
+lltdb.workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "llt"
+version.workspace = true
+edition.workspace = true
+description = "路路通离线时刻表数据包 an.db 的下载 / 解包 / 解码 CLI"
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+csv.workspace = true
+jiff.workspace = true
+rusqlite.workspace = true
+lltdb.workspace = true
+serde_json.workspace = true
+unicode-width.workspace = true
+tempfile.workspace = true
+ureq.workspace = true
+zip.workspace = true

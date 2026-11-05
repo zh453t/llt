@@ -1,0 +1,2678 @@
+//! egui 界面：车次 / 车站 / 站站三种查询。
+
+use std::collections::BTreeSet;
+use std::path::PathBuf;
+
+use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Ui};
+use egui_extras::{Column, DatePickerButton, TableBuilder};
+use jiff::civil::Date;
+
+use crate::{fonts, theme};
+use lltdb::date::{date_window, date_ymd, origin_ymd, today, weekday_cn, ymd};
+use lltdb::extras::{DiningCar, Duty, ViaPoint};
+use lltdb::{Db, OdResult, StationStop, Stop, TrainDetail, TrainSummary};
+
+const OD_RESULT_LIMIT: usize = 500;
+const STATION_SUGGESTIONS: usize = 24;
+/// 宽屏布局（右侧详情栏、自动聚焦输入框）的最小窗口宽度。
+const WIDE_MIN_WIDTH: f32 = 820.0;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Train,
+    Station,
+    Od,
+}
+
+/// 需要自动接管的输入框：切标签页 / 启动 / 清空后把焦点还给它。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FocusField {
+    Train,
+    Station,
+    OdFrom,
+    OdTo,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OdField {
+    From,
+    To,
+}
+
+/// 同城查询/车站筛选里的一个车站。
+#[derive(Clone)]
+struct StationOption {
+    index: i64,
+    name: String,
+}
+
+/// 车次详情里的附加数据（交路 / 经由 / 餐车）。
+///
+/// 旧库（`tools/decode_llt.py` 生成）没有这些表，三个字段都会是空数组，
+/// 详情面板相应只显示停站表，不占额外空间。
+#[derive(Default)]
+struct TrainExtras {
+    duties: Vec<Duty>,
+    via: Vec<ViaPoint>,
+    dining: Vec<DiningCar>,
+}
+
+impl TrainExtras {
+    /// 只保留查询日期有效的记录；当天没有有效记录时退回全部，避免整块消失。
+    fn for_date(&self, date: i64) -> (Vec<&Duty>, Vec<&DiningCar>, bool) {
+        let duties: Vec<&Duty> = self
+            .duties
+            .iter()
+            .filter(|duty| duty.runs_on(date))
+            .collect();
+        let dining: Vec<&DiningCar> = self.dining.iter().filter(|car| car.runs_on(date)).collect();
+        let matched = !duties.is_empty() || !dining.is_empty();
+        if matched {
+            (duties, dining, true)
+        } else {
+            (
+                self.duties.iter().collect(),
+                self.dining.iter().collect(),
+                false,
+            )
+        }
+    }
+}
+
+pub struct LltApp {
+    db: Option<Db>,
+    db_path: PathBuf,
+    db_error: Option<String>,
+    /// 数据库里记录的数据包版本（`20261108`），供标题栏显示数据日期。
+    data_version: Option<i64>,
+
+    tab: Tab,
+    date: Date,
+
+    train_query: String,
+    train_results: Vec<TrainSummary>,
+
+    station_query: String,
+    /// 模糊搜索：把输入解析成同城组，匹配组内所有车站。
+    station_fuzzy: bool,
+    station_suggestions: Vec<String>,
+    /// 同城组名候选（仅模糊模式）。
+    station_city_suggestions: Vec<String>,
+    /// 当前同城组的全部车站，供车站筛选。
+    station_options: Vec<StationOption>,
+    /// 车站筛选里勾选的车站下标。
+    station_selected: BTreeSet<i64>,
+    station_board_for: Option<String>,
+    station_board: Vec<StationStop>,
+
+    od_from: String,
+    od_to: String,
+    /// 模糊搜索：出发/到达都按同城组匹配。
+    od_fuzzy: bool,
+    /// 出发/到达解析失败时的同城组名候选。
+    od_city_suggestions: Vec<String>,
+    /// 结果表按实际出发站/到达站筛选。
+    od_filter_from: Option<String>,
+    od_filter_to: Option<String>,
+    od_last: OdField,
+    od_missing: Option<OdField>,
+    od_suggestions: Vec<String>,
+    od_results: Vec<OdResult>,
+    od_truncated: bool,
+    od_message: Option<String>,
+
+    selected: Option<i64>,
+    detail: Option<TrainDetail>,
+    extras: TrainExtras,
+    /// 经由列表是否只看车站（记住用户选择，切换车次时不重置）。
+    via_stations_only: bool,
+    /// 窄屏时经由改成独立页面弹出，这里记录页面是否打开。
+    via_page_open: bool,
+    /// 打开经由页时的窗口尺寸；尺寸变化时关掉页面，避免模态停在旧位置。
+    via_page_size: Option<egui::Vec2>,
+    /// 下一次绘制时要抢焦点的输入框；宽屏生效，用完即清。
+    focus_request: Option<FocusField>,
+    error: Option<String>,
+    window_fitted: bool,
+}
+
+impl LltApp {
+    pub fn new(cc: &eframe::CreationContext<'_>, db_path: PathBuf) -> Self {
+        fonts::install(&cc.egui_ctx);
+        theme::install(&cc.egui_ctx);
+
+        let mut app = Self {
+            db: None,
+            db_path,
+            db_error: None,
+            data_version: None,
+            tab: Tab::Train,
+            date: today(),
+            train_query: String::new(),
+            train_results: Vec::new(),
+            station_query: String::new(),
+            station_fuzzy: false,
+            station_suggestions: Vec::new(),
+            station_city_suggestions: Vec::new(),
+            station_options: Vec::new(),
+            station_selected: BTreeSet::new(),
+            station_board_for: None,
+            station_board: Vec::new(),
+            od_from: String::new(),
+            od_to: String::new(),
+            od_fuzzy: false,
+            od_city_suggestions: Vec::new(),
+            od_filter_from: None,
+            od_filter_to: None,
+            od_last: OdField::From,
+            od_missing: None,
+            od_suggestions: Vec::new(),
+            od_results: Vec::new(),
+            od_truncated: false,
+            od_message: None,
+            selected: None,
+            detail: None,
+            extras: TrainExtras::default(),
+            via_stations_only: true,
+            via_page_open: false,
+            via_page_size: None,
+            // 启动即聚焦车次输入框，打开就能打字。
+            focus_request: Some(FocusField::Train),
+            error: None,
+            window_fitted: false,
+        };
+        app.open_db();
+        app
+    }
+
+    fn open_db(&mut self) {
+        self.db = None;
+        self.data_version = None;
+        self.db_error = None;
+
+        match Db::open(&self.db_path) {
+            Ok(db) => {
+                self.data_version = db.data_version();
+                self.db = Some(db);
+            }
+            Err(err) => self.db_error = Some(err),
+        }
+    }
+
+    // ------------------------------------------------------------ 查询
+
+    fn refresh_train_search(&mut self) {
+        self.error = None;
+        let query = normalize_code(&self.train_query);
+        if query.is_empty() {
+            self.train_results.clear();
+            return;
+        }
+
+        let mut error = None;
+        let results = if let Some(db) = &self.db {
+            match db.search_trains(&query, None) {
+                Ok(rows) => rows,
+                Err(err) => {
+                    error = Some(format!("车次查询失败：{err}"));
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        self.error = error;
+        self.train_results = results;
+    }
+
+    fn refresh_station(&mut self) {
+        self.error = None;
+        let query = normalize_station(&self.station_query);
+        if query.is_empty() {
+            self.station_suggestions.clear();
+            self.station_city_suggestions.clear();
+            self.station_options.clear();
+            self.station_selected.clear();
+            self.station_board_for = None;
+            self.station_board.clear();
+            return;
+        }
+
+        let mut error = None;
+        let mut suggestions = Vec::new();
+        let mut cities = Vec::new();
+        let mut fuzzy_selection = None;
+        let mut exact_station = None;
+
+        if let Some(db) = &self.db {
+            match db.station_suggestions(&query, STATION_SUGGESTIONS) {
+                Ok(rows) => suggestions = rows,
+                Err(err) => error = Some(format!("车站查询失败：{err}")),
+            }
+            if self.station_fuzzy {
+                match db.city_suggestions(&query, 8) {
+                    Ok(rows) => cities = rows,
+                    Err(err) => error = Some(format!("同城候选查询失败：{err}")),
+                }
+                match db.same_city_selection(&query) {
+                    Ok(selection) => fuzzy_selection = selection,
+                    Err(err) => error = Some(format!("同城查询失败：{err}")),
+                }
+            } else {
+                match db.find_station(&query) {
+                    Ok(Some(name)) => match db.station_index(&name) {
+                        Ok(Some(index)) => exact_station = Some((name, index)),
+                        Ok(None) => {}
+                        Err(err) => error = Some(format!("车站查询失败：{err}")),
+                    },
+                    Ok(None) => {}
+                    Err(err) => error = Some(format!("车站查询失败：{err}")),
+                }
+            }
+        }
+        self.error = error;
+        self.station_suggestions = suggestions;
+        self.station_city_suggestions = cities;
+
+        if let Some((title, stations)) = fuzzy_selection {
+            self.apply_station_selection(title, stations);
+        } else if let Some((name, index)) = exact_station {
+            self.apply_station_selection(name.clone(), vec![(index, name)]);
+        } else {
+            self.station_options.clear();
+            self.station_selected.clear();
+            self.station_board_for = None;
+            self.station_board.clear();
+        }
+    }
+
+    /// 写入同城组/单站选择，并加载所有选中车站的时刻表。
+    fn apply_station_selection(&mut self, title: String, stations: Vec<(i64, String)>) {
+        self.station_board_for = Some(title);
+        self.station_options = stations
+            .into_iter()
+            .map(|(index, name)| StationOption { index, name })
+            .collect();
+        self.station_selected = self
+            .station_options
+            .iter()
+            .map(|option| option.index)
+            .collect();
+        self.reload_station_board();
+    }
+
+    /// 按当前车站筛选重新加载时刻表。
+    fn reload_station_board(&mut self) {
+        self.station_board.clear();
+        let indices: Vec<i64> = self
+            .station_options
+            .iter()
+            .filter(|option| self.station_selected.contains(&option.index))
+            .map(|option| option.index)
+            .collect();
+        if indices.is_empty() {
+            return;
+        }
+
+        let mut error = None;
+        let mut board = Vec::new();
+        if let Some(db) = &self.db {
+            match db.station_board_multi(&indices) {
+                Ok(rows) => board = rows,
+                Err(err) => error = Some(format!("读取车站时刻表失败：{err}")),
+            }
+        }
+        self.station_board = board;
+        if let Some(err) = error {
+            self.error = Some(err);
+        }
+    }
+
+    fn refresh_od(&mut self) {
+        self.error = None;
+        self.od_results.clear();
+        self.od_truncated = false;
+        self.od_message = None;
+        self.od_missing = None;
+        self.od_suggestions.clear();
+        self.od_city_suggestions.clear();
+        self.od_filter_from = None;
+        self.od_filter_to = None;
+
+        let from = normalize_station(&self.od_from);
+        let to = normalize_station(&self.od_to);
+        if from.is_empty() || to.is_empty() {
+            return;
+        }
+
+        let Some(db) = &self.db else { return };
+
+        let mut error = None;
+        let mut from_selection = None;
+        let mut to_selection = None;
+        if self.od_fuzzy {
+            match db.same_city_selection(&from) {
+                Ok(selection) => from_selection = selection,
+                Err(err) => error = Some(format!("同城查询失败：{err}")),
+            }
+            match db.same_city_selection(&to) {
+                Ok(selection) => to_selection = selection,
+                Err(err) => error = Some(format!("同城查询失败：{err}")),
+            }
+        } else {
+            match db.find_station(&from) {
+                Ok(Some(name)) => match db.station_index(&name) {
+                    Ok(Some(index)) => from_selection = Some((name.clone(), vec![(index, name)])),
+                    Ok(None) => {}
+                    Err(err) => error = Some(format!("车站查询失败：{err}")),
+                },
+                Ok(None) => {}
+                Err(err) => error = Some(format!("车站查询失败：{err}")),
+            }
+            match db.find_station(&to) {
+                Ok(Some(name)) => match db.station_index(&name) {
+                    Ok(Some(index)) => to_selection = Some((name.clone(), vec![(index, name)])),
+                    Ok(None) => {}
+                    Err(err) => error = Some(format!("车站查询失败：{err}")),
+                },
+                Ok(None) => {}
+                Err(err) => error = Some(format!("车站查询失败：{err}")),
+            }
+        }
+        self.error = error;
+
+        let missing = match (&from_selection, &to_selection) {
+            (Some(_), Some(_)) => None,
+            (None, Some(_)) => Some(OdField::From),
+            (Some(_), None) => Some(OdField::To),
+            (None, None) => Some(self.od_last),
+        };
+        if let Some(field) = missing {
+            let query = if field == OdField::From { &from } else { &to };
+            self.od_missing = Some(field);
+            self.od_message = Some(if self.od_fuzzy {
+                format!("没有找到名为「{query}」的同城组或车站，试试候选。")
+            } else {
+                format!("没有名为「{query}」的车站，试试候选站名。")
+            });
+            match db.station_suggestions(query, 8) {
+                Ok(rows) => self.od_suggestions = rows,
+                Err(err) => self.error = Some(format!("车站查询失败：{err}")),
+            }
+            if self.od_fuzzy {
+                match db.city_suggestions(query, 8) {
+                    Ok(rows) => self.od_city_suggestions = rows,
+                    Err(err) => self.error = Some(format!("同城候选查询失败：{err}")),
+                }
+            }
+            return;
+        }
+        let (Some((from_title, from_stations)), Some((to_title, to_stations))) =
+            (from_selection, to_selection)
+        else {
+            return;
+        };
+
+        let from_indices: Vec<i64> = from_stations.iter().map(|(index, _)| *index).collect();
+        let to_indices: Vec<i64> = to_stations.iter().map(|(index, _)| *index).collect();
+        let from_set: BTreeSet<i64> = from_indices.iter().copied().collect();
+        let to_set: BTreeSet<i64> = to_indices.iter().copied().collect();
+        if from_set == to_set {
+            self.od_message =
+                Some("出发与到达是同城/同一车站，请选择不同的城市或车站。".to_owned());
+            return;
+        }
+
+        match db.od_search_multi(&from_indices, &to_indices, OD_RESULT_LIMIT) {
+            Ok((rows, truncated)) => {
+                self.od_results = rows;
+                self.od_truncated = truncated;
+                if self.od_results.is_empty() {
+                    self.od_message =
+                        Some(format!("没有找到 {from_title} → {to_title} 的直达车次。"));
+                }
+            }
+            Err(err) => self.error = Some(format!("站站查询失败：{err}")),
+        }
+    }
+
+    fn select_train(&mut self, index: i64) {
+        if self.detail.as_ref().map(|d| d.summary.index) == Some(index) {
+            self.selected = Some(index);
+            return;
+        }
+        self.via_page_open = false;
+        self.via_page_size = None;
+        self.error = None;
+
+        let mut error = None;
+        let mut detail = None;
+        let mut extras = TrainExtras::default();
+        if let Some(db) = &self.db {
+            match db.train_detail(index) {
+                Ok(d) => detail = Some(d),
+                Err(err) => error = Some(format!("读取车次详情失败：{err}")),
+            }
+            // 附加数据缺失（旧库）时返回空数组，不影响停站表。
+            extras.duties = db.duties_for(index).unwrap_or_default();
+            extras.via = db.via_points(index).unwrap_or_default();
+            extras.dining = db.dining_cars(index).unwrap_or_default();
+        }
+        if let Some(err) = error {
+            self.error = Some(err);
+        }
+        if let Some(detail) = detail {
+            self.selected = Some(index);
+            self.detail = Some(detail);
+            self.extras = extras;
+        }
+    }
+
+    // ------------------------------------------------------------ 界面
+
+    fn header(&mut self, ui: &mut Ui) {
+        let width = ui.available_width();
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("路路通时刻表")
+                    .size(theme::FONT_TITLE)
+                    .family(fonts::bold_family()),
+            );
+            if width > 700.0
+                && let Some(version) = self.data_version
+            {
+                ui.add_space(theme::GAP_XS);
+                ui.label(meta(format!("数据 {}", date_ymd(version))).weak())
+                    .on_hover_text(format!("数据包版本 {version}（库内 meta.data_version）"));
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let dark = ui.visuals().dark_mode;
+                let (label, next_theme) = if dark {
+                    ("浅色", egui::Theme::Light)
+                } else {
+                    ("深色", egui::Theme::Dark)
+                };
+                if ui.add(egui::Button::new(meta(label))).clicked() {
+                    ui.ctx().set_theme(next_theme);
+                }
+                if width > 980.0 {
+                    let file_name = self
+                        .db_path
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| self.db_path.display().to_string());
+                    ui.label(meta(file_name).weak())
+                        .on_hover_text(self.db_path.display().to_string());
+                }
+            });
+        });
+
+        ui.add_space(theme::GAP_S);
+        let inline_date = ui.available_width() >= 640.0;
+        ui.horizontal(|ui| {
+            // 标签页之间只靠内边距分隔，避免多余的分隔线。
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let tabs = [
+                (Tab::Train, "按车次"),
+                (Tab::Station, "按车站"),
+                (Tab::Od, "站站查询"),
+            ];
+            for (tab, label) in tabs {
+                if ui
+                    .selectable_value(
+                        &mut self.tab,
+                        tab,
+                        RichText::new(label).size(theme::FONT_BODY),
+                    )
+                    .clicked()
+                {
+                    // 点标签页（含重复点当前页）就把焦点交回该页的输入框。
+                    self.focus_request = Some(match tab {
+                        Tab::Train => FocusField::Train,
+                        Tab::Station => FocusField::Station,
+                        Tab::Od if self.od_from.trim().is_empty() => FocusField::OdFrom,
+                        Tab::Od if self.od_to.trim().is_empty() => FocusField::OdTo,
+                        Tab::Od => FocusField::OdFrom,
+                    });
+                }
+            }
+
+            // 宽屏时日期控件跟在标签页后面；窄屏单独一行，避免日期被换行拆散。
+            if inline_date {
+                ui.add_space(theme::GAP_M);
+                ui.separator();
+                ui.add_space(theme::GAP_M);
+                self.date_controls(ui);
+            }
+        });
+        if !inline_date {
+            ui.add_space(theme::GAP_XS);
+            ui.horizontal(|ui| self.date_controls(ui));
+        }
+    }
+
+    /// 查询日期这一组：标签、日期选择、星期、可选的「今天」按钮。
+    ///
+    /// 全部放在同一个水平布局里直接排列，保证基线一致；控件高度由主题统一。
+    fn date_controls(&mut self, ui: &mut Ui) {
+        ui.spacing_mut().item_spacing.x = theme::GAP_S;
+        ui.label(meta("查询日期").weak());
+        ui.add(
+            DatePickerButton::new(&mut self.date)
+                .id_salt("query_date")
+                .show_icon(false)
+                // 默认的红色周末高亮和 ISO 周数列与本应用的配色/信息密度不符。
+                .highlight_weekends(false)
+                .calendar_week(false)
+                .start_end_years(2000..=2100),
+        );
+        ui.label(meta(weekday_cn(self.date)).weak());
+        let current_date = today();
+        if self.date != current_date {
+            ui.add_space(theme::GAP_XS);
+            if ui.add(egui::Button::new(meta("今天"))).clicked() {
+                self.date = current_date;
+            }
+        }
+    }
+
+    fn error_banner(&mut self, ui: &mut Ui) {
+        let mut dismiss = false;
+        if let Some(error) = &self.error {
+            let color = ui.visuals().error_fg_color;
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(error).size(theme::FONT_META).color(color));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.small_button("忽略").clicked() {
+                        dismiss = true;
+                    }
+                });
+            });
+            ui.add_space(theme::GAP_S);
+        }
+        if dismiss {
+            self.error = None;
+        }
+    }
+
+    /// 把焦点交给输入框：只在启动、切标签页、清空这三个「用户刚做完动作」的时刻触发，
+    /// 不做逐帧抢占，否则点复选框、日期控件、筛选 chips 都会被抢回去。
+    ///
+    /// 窄屏不接管：小窗口常对应触屏，弹出行内键盘比省一次点击更烦。
+    fn take_focus(&mut self, ui: &Ui, field: FocusField, response: &egui::Response) {
+        if self.focus_request != Some(field) {
+            return;
+        }
+        self.focus_request = None;
+        if ui.ctx().content_rect().width() >= WIDE_MIN_WIDTH {
+            response.request_focus();
+        }
+    }
+
+    fn train_ui(&mut self, ui: &mut Ui) {
+        let width = ui.available_width();
+        let field_width = (width * 0.34).clamp(140.0, 240.0);
+        let mut clear = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = theme::GAP_S;
+            ui.label(RichText::new("车次").size(theme::FONT_BODY));
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.train_query)
+                    .hint_text("例如 G1 / K54 / 1461")
+                    .desired_width(field_width),
+            );
+            self.take_focus(ui, FocusField::Train, &response);
+            if response.changed() {
+                self.refresh_train_search();
+            }
+            if !self.train_query.trim().is_empty() {
+                if ui.add(egui::Button::new(meta("清空"))).clicked() {
+                    clear = true;
+                }
+                ui.label(meta(format!("{} 条匹配", self.train_results.len())).weak());
+            }
+        });
+        if clear {
+            self.train_query.clear();
+            self.train_results.clear();
+            // 清空是为了立刻重输，焦点留在（还给）输入框。
+            self.focus_request = Some(FocusField::Train);
+        }
+        ui.add_space(theme::GAP_S);
+
+        if self.train_query.trim().is_empty() {
+            empty_state(
+                ui,
+                "按车次查询",
+                "输入车次号开始查询，支持前缀匹配（G1）和车次号（54）。",
+            );
+            return;
+        }
+        if self.train_results.is_empty() {
+            empty_state(
+                ui,
+                "没有匹配的车次",
+                "试试完整车次（G1）或去掉前缀的车次号（54）。",
+            );
+            return;
+        }
+
+        let selected_ymd = ymd(self.date);
+        let (running, not_running): (Vec<&TrainSummary>, Vec<&TrainSummary>) = self
+            .train_results
+            .iter()
+            .partition(|train| train.runs_on(selected_ymd));
+        let rows: Vec<&TrainSummary> = running.iter().chain(not_running.iter()).copied().collect();
+        let running_count = running.len();
+        show_counts(ui, None, running_count, rows.len() - running_count);
+        let selected = self.selected;
+        let clicked = Self::train_rows_table(ui, &rows, running_count, selected, "train_results");
+        if let Some(index) = clicked {
+            self.select_train(index);
+        }
+    }
+
+    fn train_rows_table(
+        ui: &mut Ui,
+        rows: &[&TrainSummary],
+        running_count: usize,
+        selected: Option<i64>,
+        salt: &str,
+    ) -> Option<i64> {
+        let width = ui.available_width();
+        let wide = width >= 760.0;
+        // 很窄（例如侧边详情把列表压到 430 点左右）时先收起开行日期，
+        // 日期改在车次单元格的悬停提示里给出，避免日期被硬裁掉。
+        let show_date = width >= 560.0;
+        let header_top = ui.cursor().top();
+        let mut clicked = None;
+        let mut table = TableBuilder::new(ui)
+            .id_salt(salt)
+            .striped(true)
+            .sense(Sense::click())
+            .auto_shrink([false, false])
+            .min_scrolled_height(0.0)
+            .cell_layout(cell_layout())
+            .column(Column::exact(34.0))
+            .column(Column::initial(94.0).at_least(78.0));
+        if wide {
+            table = table.column(Column::initial(92.0).at_least(80.0));
+        }
+        table = table.column(Column::remainder().at_least(150.0));
+        if wide {
+            table = table
+                .column(Column::initial(84.0).at_least(76.0))
+                .column(Column::initial(58.0));
+        }
+        if show_date {
+            table = table.column(Column::initial(168.0).at_least(150.0));
+        }
+
+        table
+            .header(theme::LIST_HEADER_HEIGHT, |mut header| {
+                header.col(|ui| table_head(ui, "状态"));
+                header.col(|ui| table_head(ui, "车次"));
+                if wide {
+                    header.col(|ui| table_head(ui, "类型"));
+                }
+                header.col(|ui| table_head(ui, "始发 → 终到"));
+                if wide {
+                    header.col(|ui| table_head_right(ui, "里程"));
+                    header.col(|ui| table_head_right(ui, "天数"));
+                }
+                if show_date {
+                    header.col(|ui| table_head(ui, "开行日期"));
+                }
+            })
+            .body(|body| {
+                body.rows(theme::LIST_ROW_HEIGHT, rows.len(), |mut row| {
+                    let train = rows[row.index()];
+                    let running = row.index() < running_count;
+                    row.set_selected(selected == Some(train.index));
+                    if running_count > 0 && row.index() == running_count {
+                        row.set_overline(true);
+                    }
+                    let window = date_window(train.date_from, train.date_to);
+                    row.col(|ui| {
+                        status_cell(ui, running);
+                    });
+                    row.col(|ui| {
+                        train_code_cell(ui, &train.code, (!show_date).then_some(window.as_str()));
+                    });
+                    if wide {
+                        row.col(|ui| {
+                            ui.add(egui::Label::new(&train.kind).truncate());
+                        });
+                    }
+                    row.col(|ui| {
+                        route_cell(ui, &train.first, &train.last);
+                    });
+                    if wide {
+                        row.col(|ui| {
+                            right_label(ui, format!("{} km", train.total_km));
+                        });
+                        row.col(|ui| {
+                            right_label(ui, format!("{} 天", train.days));
+                        });
+                    }
+                    if show_date {
+                        row.col(|ui| {
+                            ui.label(meta(window));
+                        });
+                    }
+                    if row.response().clicked() {
+                        clicked = Some(train.index);
+                    }
+                });
+            });
+        paint_header_line(ui, header_top, theme::LIST_HEADER_HEIGHT);
+
+        clicked
+    }
+
+    fn station_ui(&mut self, ui: &mut Ui) {
+        let width = ui.available_width();
+        let field_width = (width * 0.34).clamp(140.0, 240.0);
+        let mut clear = false;
+        let mut changed = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = theme::GAP_S;
+            ui.label(RichText::new("车站").size(theme::FONT_BODY));
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.station_query)
+                    .hint_text("例如 北京 / 北京南")
+                    .desired_width(field_width),
+            );
+            self.take_focus(ui, FocusField::Station, &response);
+            if response.changed() {
+                changed = true;
+            }
+            if !self.station_query.trim().is_empty()
+                && ui.add(egui::Button::new(meta("清空"))).clicked()
+            {
+                clear = true;
+            }
+            let fuzzy = ui
+                .checkbox(&mut self.station_fuzzy, meta("模糊"))
+                .on_hover_text("模糊搜索：按城市/同城组匹配，包含同城所有车站");
+            if fuzzy.changed() {
+                changed = true;
+            }
+            if let Some(title) = &self.station_board_for {
+                let text = if self.station_options.len() > 1 {
+                    if width >= 430.0 {
+                        format!(
+                            "{} · {} 站 · {} 趟经停",
+                            title,
+                            self.station_selected.len(),
+                            self.station_board.len()
+                        )
+                    } else {
+                        format!(
+                            "{} 站 · {} 趟",
+                            self.station_selected.len(),
+                            self.station_board.len()
+                        )
+                    }
+                } else {
+                    format!("{} · {} 趟经停", title, self.station_board.len())
+                };
+                ui.label(meta(text).weak());
+            }
+        });
+        if clear {
+            self.station_query.clear();
+            self.station_suggestions.clear();
+            self.station_city_suggestions.clear();
+            self.station_options.clear();
+            self.station_selected.clear();
+            self.station_board_for = None;
+            self.station_board.clear();
+            self.focus_request = Some(FocusField::Station);
+        } else if changed {
+            self.refresh_station();
+        }
+
+        // 同城组候选（模糊模式）与普通车站候选分开显示，点击后都走同一条解析路径。
+        if self.station_fuzzy && !self.station_city_suggestions.is_empty() {
+            let current = self.station_board_for.clone();
+            let mut picked = None;
+            ui.add_space(theme::GAP_XS);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::GAP_XS;
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.label(meta("同城组").weak());
+                ui.add_space(theme::GAP_XS);
+                for city in &self.station_city_suggestions {
+                    let selected = current.as_deref() == Some(city.as_str());
+                    if ui
+                        .selectable_label(selected, RichText::new(city).size(theme::FONT_META))
+                        .clicked()
+                    {
+                        picked = Some(city.clone());
+                    }
+                }
+            });
+            if let Some(city) = picked {
+                self.station_query = city;
+                self.refresh_station();
+            }
+        }
+
+        if !self.station_suggestions.is_empty() {
+            let current = self.station_board_for.clone();
+            let mut picked = None;
+            ui.add_space(theme::GAP_XS);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::GAP_XS;
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.label(meta("候选站").weak());
+                ui.add_space(theme::GAP_XS);
+                for station in &self.station_suggestions {
+                    let selected = current.as_deref() == Some(station.as_str());
+                    if ui
+                        .selectable_label(selected, RichText::new(station).size(theme::FONT_META))
+                        .clicked()
+                    {
+                        picked = Some(station.clone());
+                    }
+                }
+            });
+            if let Some(station) = picked {
+                self.station_query = station;
+                self.refresh_station();
+            }
+        }
+
+        // 同城组内的车站筛选；勾选变化后按新集合重新查一次停站。
+        if self.station_options.len() > 1 {
+            let mut toggle = None;
+            let mut select_all = false;
+            let mut select_none = false;
+            ui.add_space(theme::GAP_XS);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::GAP_XS;
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.label(meta("车站筛选").weak());
+                ui.add_space(theme::GAP_XS);
+                for option in &self.station_options {
+                    let selected = self.station_selected.contains(&option.index);
+                    if ui
+                        .selectable_label(
+                            selected,
+                            RichText::new(&option.name).size(theme::FONT_META),
+                        )
+                        .clicked()
+                    {
+                        toggle = Some(option.index);
+                    }
+                }
+                ui.add_space(theme::GAP_S);
+                if ui.add(egui::Button::new(meta("全选"))).clicked() {
+                    select_all = true;
+                }
+                if ui.add(egui::Button::new(meta("全不选"))).clicked() {
+                    select_none = true;
+                }
+            });
+            if let Some(index) = toggle {
+                if !self.station_selected.remove(&index) {
+                    self.station_selected.insert(index);
+                }
+                self.reload_station_board();
+            } else if select_all {
+                self.station_selected = self
+                    .station_options
+                    .iter()
+                    .map(|option| option.index)
+                    .collect();
+                self.reload_station_board();
+            } else if select_none {
+                self.station_selected.clear();
+                self.reload_station_board();
+            }
+        }
+
+        ui.add_space(theme::GAP_S);
+        if self.station_board_for.is_none() {
+            if self.station_query.trim().is_empty() {
+                empty_state(
+                    ui,
+                    "按车站查询",
+                    "输入车站名或城市名，查询在该站/同城停靠的列车。",
+                );
+            } else {
+                empty_state(
+                    ui,
+                    "没有找到这个车站或同城组",
+                    "试试上方的候选站名或同城组。",
+                );
+            }
+            return;
+        }
+        if self.station_selected.is_empty() {
+            empty_state(ui, "未选择车站", "在车站筛选里勾选至少一个车站。");
+            return;
+        }
+        if self.station_board.is_empty() {
+            empty_state(ui, "所选车站暂无经停列车", "换一个车站，或检查数据库。");
+            return;
+        }
+
+        let date = self.date;
+        let (running, not_running): (Vec<&StationStop>, Vec<&StationStop>) = self
+            .station_board
+            .iter()
+            .partition(|stop| stop.runs_on(origin_ymd(date, stop.day)));
+        let rows: Vec<&StationStop> = running.iter().chain(not_running.iter()).copied().collect();
+        let running_count = running.len();
+        show_counts(ui, None, running_count, rows.len() - running_count);
+        let selected = self.selected;
+        let show_station = self.station_selected.len() > 1;
+        let clicked = Self::station_rows_table(
+            ui,
+            &rows,
+            running_count,
+            selected,
+            "station_board",
+            show_station,
+        );
+        if let Some(index) = clicked {
+            self.select_train(index);
+        }
+    }
+
+    fn station_rows_table(
+        ui: &mut Ui,
+        rows: &[&StationStop],
+        running_count: usize,
+        selected: Option<i64>,
+        salt: &str,
+        show_station: bool,
+    ) -> Option<i64> {
+        // 窗口足够宽时才展示停留 / 第几天 / 类型，避免列被挤到互相覆盖；
+        // 更窄时再收起本站里程，把宽度留给时刻和始发终到。
+        let width = ui.available_width();
+        let wide = width >= 880.0;
+        let show_km = width >= 560.0;
+        // 极窄（例如 900 点窗口右侧详情占掉一半）时收起「始发 → 终到」，
+        // 路线改在车次单元格的悬停提示里，避免表格横向溢出。
+        // 同城多站时「车站」列优先于始发终到，路线再往后放。
+        let show_route = width >= if show_station { 620.0 } else { 430.0 };
+        let header_top = ui.cursor().top();
+        let mut clicked = None;
+        let mut table = TableBuilder::new(ui)
+            .id_salt(salt)
+            .striped(true)
+            .sense(Sense::click())
+            .auto_shrink([false, false])
+            .min_scrolled_height(0.0)
+            .cell_layout(cell_layout())
+            .column(Column::exact(34.0))
+            .column(Column::initial(96.0).at_least(80.0));
+        if show_station {
+            table = table.column(Column::initial(86.0).at_least(72.0));
+        }
+        table = table
+            .column(Column::initial(74.0).at_least(68.0))
+            .column(Column::initial(74.0).at_least(68.0));
+        if wide {
+            table = table
+                .column(Column::initial(64.0))
+                .column(Column::initial(58.0));
+        }
+        if show_km {
+            table = table.column(Column::initial(82.0).at_least(74.0));
+        }
+        if wide {
+            table = table.column(Column::initial(92.0).at_least(80.0));
+        }
+        if show_route {
+            table = table.column(Column::remainder().at_least(110.0));
+        }
+
+        table
+            .header(theme::LIST_HEADER_HEIGHT, |mut header| {
+                header.col(|ui| table_head(ui, "状态"));
+                header.col(|ui| table_head(ui, "车次"));
+                if show_station {
+                    header.col(|ui| table_head(ui, "车站"));
+                }
+                header.col(|ui| table_head(ui, "到达"));
+                header.col(|ui| table_head(ui, "发车"));
+                if wide {
+                    header.col(|ui| table_head_right(ui, "停留"));
+                    header.col(|ui| table_head(ui, "第几天"));
+                }
+                if show_km {
+                    header.col(|ui| table_head_right(ui, "本站里程"));
+                }
+                if wide {
+                    header.col(|ui| table_head(ui, "类型"));
+                }
+                if show_route {
+                    header.col(|ui| table_head(ui, "始发 → 终到"));
+                }
+            })
+            .body(|body| {
+                body.rows(theme::LIST_ROW_HEIGHT, rows.len(), |mut row| {
+                    let stop = rows[row.index()];
+                    let running = row.index() < running_count;
+                    row.set_selected(selected == Some(stop.train_index));
+                    if running_count > 0 && row.index() == running_count {
+                        row.set_overline(true);
+                    }
+                    row.col(|ui| {
+                        status_cell(ui, running);
+                    });
+                    let route = format!("{} → {}", stop.first, stop.last);
+                    row.col(|ui| {
+                        train_code_cell(ui, &stop.code, (!show_route).then_some(route.as_str()));
+                    });
+                    if show_station {
+                        row.col(|ui| {
+                            ui.add(egui::Label::new(&stop.station).truncate());
+                        });
+                    }
+                    row.col(|ui| {
+                        ui.label(RichText::new(time_with_day(&stop.arrive, stop.day)).monospace());
+                    });
+                    row.col(|ui| {
+                        ui.label(RichText::new(time_with_day(&stop.depart, stop.day)).monospace());
+                    });
+                    if wide {
+                        row.col(|ui| {
+                            right_label(ui, format!("{} 分", stop.dwell_min));
+                        });
+                        row.col(|ui| {
+                            ui.label(format!("第 {} 天", stop.day));
+                        });
+                    }
+                    if show_km {
+                        row.col(|ui| {
+                            right_label(ui, format!("{} km", stop.km));
+                        });
+                    }
+                    if wide {
+                        row.col(|ui| {
+                            ui.add(egui::Label::new(&stop.kind).truncate());
+                        });
+                    }
+                    if show_route {
+                        row.col(|ui| {
+                            route_cell(ui, &stop.first, &stop.last);
+                        });
+                    }
+                    if row.response().clicked() {
+                        clicked = Some(stop.train_index);
+                    }
+                });
+            });
+        paint_header_line(ui, header_top, theme::LIST_HEADER_HEIGHT);
+
+        clicked
+    }
+
+    fn od_ui(&mut self, ui: &mut Ui) {
+        let width = ui.available_width();
+        let field_width = ((width - 300.0) / 2.0).clamp(110.0, 170.0);
+        let mut changed = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = theme::GAP_S;
+            let fuzzy = ui
+                .checkbox(&mut self.od_fuzzy, meta("模糊"))
+                .on_hover_text("模糊搜索：出发/到达按城市或同城组匹配所有车站");
+            if fuzzy.changed() {
+                changed = true;
+            }
+            ui.label(RichText::new("出发").size(theme::FONT_BODY));
+            let from = ui.add(
+                egui::TextEdit::singleline(&mut self.od_from)
+                    .hint_text("北京")
+                    .desired_width(field_width),
+            );
+            self.take_focus(ui, FocusField::OdFrom, &from);
+            if from.changed() {
+                self.od_last = OdField::From;
+                changed = true;
+            }
+
+            if ui.add(egui::Button::new(meta("交换"))).clicked() {
+                std::mem::swap(&mut self.od_from, &mut self.od_to);
+                changed = true;
+            }
+
+            ui.label(RichText::new("到达").size(theme::FONT_BODY));
+            let to = ui.add(
+                egui::TextEdit::singleline(&mut self.od_to)
+                    .hint_text("上海")
+                    .desired_width(field_width),
+            );
+            self.take_focus(ui, FocusField::OdTo, &to);
+            if to.changed() {
+                self.od_last = OdField::To;
+                changed = true;
+            }
+
+            let can_query = !self.od_from.trim().is_empty() && !self.od_to.trim().is_empty();
+            let (fill, text_color) = if can_query {
+                (theme::primary_fill(ui), theme::primary_text())
+            } else {
+                (
+                    ui.visuals().widgets.inactive.weak_bg_fill,
+                    ui.visuals().weak_text_color(),
+                )
+            };
+            let button = egui::Button::new(
+                RichText::new("查询")
+                    .size(theme::FONT_BODY)
+                    .color(text_color),
+            )
+            .fill(fill)
+            .stroke(egui::Stroke::NONE);
+            if ui.add_enabled(can_query, button).clicked() {
+                changed = true;
+            }
+        });
+        if changed {
+            self.refresh_od();
+        }
+
+        if let Some(message) = &self.od_message {
+            ui.add_space(theme::GAP_XS);
+            ui.label(meta(message).weak());
+        }
+
+        if let Some(field) = self.od_missing {
+            let mut picked = None;
+            if self.od_fuzzy && !self.od_city_suggestions.is_empty() {
+                ui.add_space(theme::GAP_XS);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = theme::GAP_XS;
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(meta("同城组").weak());
+                    ui.add_space(theme::GAP_XS);
+                    for city in &self.od_city_suggestions {
+                        if ui.add(egui::Button::new(meta(city))).clicked() {
+                            picked = Some(city.clone());
+                        }
+                    }
+                });
+            }
+            ui.add_space(theme::GAP_XS);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::GAP_XS;
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.label(meta("候选站").weak());
+                ui.add_space(theme::GAP_XS);
+                for station in &self.od_suggestions {
+                    if ui.add(egui::Button::new(meta(station))).clicked() {
+                        picked = Some(station.clone());
+                    }
+                }
+            });
+            if let Some(station) = picked {
+                match field {
+                    OdField::From => self.od_from = station,
+                    OdField::To => self.od_to = station,
+                }
+                self.od_last = field;
+                self.refresh_od();
+            }
+            return;
+        }
+
+        if self.od_results.is_empty() {
+            if self.od_message.is_none() {
+                empty_state(ui, "站站查询", "输入出发站和到达站，查询可直达的列车。");
+            }
+            return;
+        }
+
+        // 同城结果里按实际出发站/到达站筛选；两侧互为约束：
+        // 选定出发站后，没有对应直达车次的到达站 chip 会被禁用（反向同理）。
+        let from_options: BTreeSet<String> = self
+            .od_results
+            .iter()
+            .map(|hit| hit.from_station.clone())
+            .collect();
+        let to_options: BTreeSet<String> = self
+            .od_results
+            .iter()
+            .map(|hit| hit.to_station.clone())
+            .collect();
+        // 先清掉与另一侧筛选不兼容的选择，避免筛出空列表。
+        let mut to_available = od_to_available(&self.od_results, self.od_filter_from.as_deref());
+        if self
+            .od_filter_to
+            .as_ref()
+            .is_some_and(|name| !to_available.contains(name))
+        {
+            self.od_filter_to = None;
+        }
+        let mut from_available = od_from_available(&self.od_results, self.od_filter_to.as_deref());
+        if self
+            .od_filter_from
+            .as_ref()
+            .is_some_and(|name| !from_available.contains(name))
+        {
+            self.od_filter_from = None;
+            // 出发站被清掉后，到达站重新全部可用。
+            from_available = od_from_available(&self.od_results, self.od_filter_to.as_deref());
+            to_available = od_to_available(&self.od_results, None);
+        }
+
+        if from_options.len() > 1 || to_options.len() > 1 {
+            let had_filter = self.od_filter_from.is_some() || self.od_filter_to.is_some();
+            ui.add_space(theme::GAP_XS);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::GAP_XS;
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.label(meta("车站筛选").weak());
+                ui.add_space(theme::GAP_XS);
+                Self::filter_chips(
+                    ui,
+                    "出发",
+                    &from_options,
+                    &from_available,
+                    &mut self.od_filter_from,
+                );
+                ui.add_space(theme::GAP_M);
+                Self::filter_chips(
+                    ui,
+                    "到达",
+                    &to_options,
+                    &to_available,
+                    &mut self.od_filter_to,
+                );
+                if had_filter {
+                    ui.add_space(theme::GAP_M);
+                    if ui.add(egui::Button::new(meta("清除筛选"))).clicked() {
+                        self.od_filter_from = None;
+                        self.od_filter_to = None;
+                    }
+                }
+            });
+        }
+
+        let filtered: Vec<&OdResult> = self
+            .od_results
+            .iter()
+            .filter(|hit| {
+                self.od_filter_from
+                    .as_ref()
+                    .is_none_or(|name| &hit.from_station == name)
+                    && self
+                        .od_filter_to
+                        .as_ref()
+                        .is_none_or(|name| &hit.to_station == name)
+            })
+            .collect();
+        if filtered.is_empty() {
+            ui.add_space(theme::GAP_XS);
+            empty_state(
+                ui,
+                "当前筛选没有车次",
+                "调整出发站/到达站筛选，或清除筛选。",
+            );
+            return;
+        }
+
+        let mut count = format!("{} 趟直达", filtered.len());
+        if self.od_truncated {
+            count = format!("仅显示前 {OD_RESULT_LIMIT} 趟直达");
+        } else if filtered.len() != self.od_results.len() {
+            count = format!(
+                "{} 趟直达（共 {} 趟）",
+                filtered.len(),
+                self.od_results.len()
+            );
+        }
+
+        let date = self.date;
+        let (running, not_running): (Vec<&OdResult>, Vec<&OdResult>) = filtered
+            .iter()
+            .copied()
+            .partition(|hit| hit.runs_on(origin_ymd(date, hit.depart_day)));
+        let rows: Vec<&OdResult> = running.iter().chain(not_running.iter()).copied().collect();
+        let running_count = running.len();
+        show_counts(ui, Some(count), running_count, rows.len() - running_count);
+        let selected = self.selected;
+        let clicked = Self::od_rows_table(ui, &rows, running_count, selected, "od_results");
+        if let Some(index) = clicked {
+            self.select_train(index);
+        }
+    }
+
+    /// 一站一 chips 的筛选；`全部` 取消筛选。
+    ///
+    /// `options` 是结果里出现过的全部车站，`available` 是与另一侧筛选兼容的子集；
+    /// 不在 `available` 里的车站会禁用并说明原因。
+    fn filter_chips(
+        ui: &mut Ui,
+        label: &str,
+        options: &BTreeSet<String>,
+        available: &BTreeSet<String>,
+        selected: &mut Option<String>,
+    ) {
+        ui.label(meta(label).weak());
+        if ui
+            .selectable_label(
+                selected.is_none(),
+                RichText::new("全部").size(theme::FONT_META),
+            )
+            .clicked()
+        {
+            *selected = None;
+        }
+        for option in options {
+            let active = selected.as_deref() == Some(option.as_str());
+            let enabled = available.contains(option);
+            let response = ui.add_enabled(
+                enabled,
+                egui::Button::selectable(active, RichText::new(option).size(theme::FONT_META)),
+            );
+            if response.clicked() {
+                *selected = Some(option.clone());
+            }
+            if !enabled {
+                response.on_disabled_hover_text(format!("另一侧已选车站没有到{option}的直达车次"));
+            }
+        }
+    }
+
+    fn od_rows_table(
+        ui: &mut Ui,
+        rows: &[&OdResult],
+        running_count: usize,
+        selected: Option<i64>,
+        salt: &str,
+    ) -> Option<i64> {
+        let width = ui.available_width();
+        let wide = width >= 840.0;
+        // 区段就是查询条件本身，极窄时收起它，把空间留给时刻。
+        let show_segment = width >= 560.0;
+        // 极窄时把历时移到车次悬停提示里，保证五个基本列不横向溢出。
+        let show_duration = width >= 450.0;
+        let header_top = ui.cursor().top();
+        let mut clicked = None;
+        let mut table = TableBuilder::new(ui)
+            .id_salt(salt)
+            .striped(true)
+            .sense(Sense::click())
+            .auto_shrink([false, false])
+            .min_scrolled_height(0.0)
+            .cell_layout(cell_layout())
+            .column(Column::exact(34.0))
+            .column(Column::initial(92.0).at_least(78.0))
+            .column(Column::initial(82.0).at_least(74.0))
+            .column(Column::initial(82.0).at_least(74.0));
+        if show_duration {
+            // “18小时46分”“1天10小时05分”等最长历时需要约 100+ 点。
+            table = table.column(Column::initial(110.0).at_least(100.0));
+        }
+        if wide {
+            table = table
+                .column(Column::initial(82.0).at_least(74.0))
+                .column(Column::initial(88.0).at_least(80.0));
+        }
+        if show_segment {
+            table = table.column(Column::remainder().at_least(110.0));
+        }
+
+        table
+            .header(theme::LIST_HEADER_HEIGHT, |mut header| {
+                header.col(|ui| table_head(ui, "状态"));
+                header.col(|ui| table_head(ui, "车次"));
+                header.col(|ui| table_head(ui, "出发"));
+                header.col(|ui| table_head(ui, "到达"));
+                if show_duration {
+                    header.col(|ui| table_head(ui, "历时"));
+                }
+                if wide {
+                    header.col(|ui| table_head_right(ui, "里程"));
+                    header.col(|ui| table_head(ui, "类型"));
+                }
+                if show_segment {
+                    header.col(|ui| table_head(ui, "区段"));
+                }
+            })
+            .body(|body| {
+                body.rows(theme::LIST_ROW_HEIGHT, rows.len(), |mut row| {
+                    let hit = rows[row.index()];
+                    let running = row.index() < running_count;
+                    row.set_selected(selected == Some(hit.train_index));
+                    if running_count > 0 && row.index() == running_count {
+                        row.set_overline(true);
+                    }
+                    row.col(|ui| {
+                        status_cell(ui, running);
+                    });
+                    let duration = fmt_duration(hit.duration_min());
+                    let segment = format!("{} → {}", hit.from_station, hit.to_station);
+                    let mut tips = Vec::new();
+                    if !show_segment {
+                        tips.push(segment.clone());
+                    }
+                    if !show_duration {
+                        tips.push(duration.clone());
+                    }
+                    let tip = (!tips.is_empty()).then(|| tips.join(" · "));
+                    row.col(|ui| {
+                        train_code_cell(ui, &hit.code, tip.as_deref());
+                    });
+                    row.col(|ui| {
+                        ui.label(
+                            RichText::new(time_with_day(&hit.depart, hit.depart_day)).monospace(),
+                        );
+                    });
+                    row.col(|ui| {
+                        ui.label(
+                            RichText::new(time_with_day(&hit.arrive, hit.arrive_day)).monospace(),
+                        );
+                    });
+                    if show_duration {
+                        row.col(|ui| {
+                            ui.label(&duration);
+                        });
+                    }
+                    if wide {
+                        row.col(|ui| {
+                            right_label(ui, format!("{} km", hit.km()));
+                        });
+                        row.col(|ui| {
+                            ui.label(&hit.kind);
+                        });
+                    }
+                    if show_segment {
+                        row.col(|ui| {
+                            ui.add(egui::Label::new(&segment).truncate())
+                                .on_hover_text(format!(
+                                    "{segment}
+全程：{} → {}",
+                                    hit.first, hit.last
+                                ));
+                        });
+                    }
+                    if row.response().clicked() {
+                        clicked = Some(hit.train_index);
+                    }
+                });
+            });
+        paint_header_line(ui, header_top, theme::LIST_HEADER_HEIGHT);
+
+        clicked
+    }
+
+    /// `compact` 为真时（窗口窄、详情在底部），改为左右分栏：
+    /// 左边是车次信息，右边是停站表；经由不再内嵌，而是在停站表下方
+    /// 放一个入口，点开后用独立页面显示。更窄时改为上下排列。
+    fn detail_ui(&mut self, ui: &mut Ui, compact: bool) {
+        let Some(detail) = &self.detail else {
+            ui.label("未选择车次");
+            return;
+        };
+
+        let mut close = false;
+        let mut stations_only = self.via_stations_only;
+        let mut via_page_open = self.via_page_open;
+        let screen = ui.ctx().content_rect().size();
+        if via_page_open && self.via_page_size != Some(screen) {
+            via_page_open = false;
+        }
+        let extras = &self.extras;
+        let date = ymd(self.date);
+        let open = format!(
+            "开行 {}",
+            date_window(detail.summary.date_from, detail.summary.date_to)
+        );
+
+        if compact && ui.available_width() < 580.0 {
+            // 更窄时左右分栏会把停站表压到放不下，改成上下排列：
+            // 信息区限高并可滚动，停站表拿到整行宽度，经由入口放在最下面。
+            let has_via = !extras.via.is_empty();
+            let trigger_height = if has_via {
+                theme::CONTROL_HEIGHT + theme::GAP_S
+            } else {
+                0.0
+            };
+            // 信息区按内容收缩、最多占 45%，其余高度留给停站表；
+            // 内容太长时信息区自己滚动，不会把表格挤没。
+            let info_max = (ui.available_height() * 0.45).clamp(120.0, 240.0);
+            header_ui(ui, detail, true, open.clone(), &mut close);
+            ui.add_space(theme::GAP_S);
+            ui.separator();
+            ui.add_space(theme::GAP_S);
+            egui::ScrollArea::vertical()
+                .id_salt("detail_info_scroll_narrow")
+                .max_height(info_max)
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    extras_ui(ui, &detail.summary, extras, &detail.stops, date);
+                });
+            ui.add_space(theme::GAP_S);
+            ui.separator();
+            ui.add_space(theme::GAP_S);
+            let table_height = (ui.available_height() - trigger_height).max(80.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), table_height),
+                Layout::top_down(Align::Min),
+                |ui| stops_table_ui(ui, &detail.stops),
+            );
+            if has_via {
+                ui.add_space(theme::GAP_S);
+                via_page_trigger(ui, &extras.via, &mut via_page_open);
+            }
+        } else if compact {
+            let height = ui.available_height();
+            let left_width = (ui.available_width() * 0.42).clamp(260.0, 460.0);
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(left_width, height),
+                    Layout::top_down(Align::Min),
+                    |ui| {
+                        header_ui(ui, detail, true, open.clone(), &mut close);
+                        ui.add_space(theme::GAP_S);
+                        ui.separator();
+                        ui.add_space(theme::GAP_S);
+                        egui::ScrollArea::vertical()
+                            .id_salt("detail_info_scroll")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                extras_ui(ui, &detail.summary, extras, &detail.stops, date);
+                            });
+                    },
+                );
+                ui.separator();
+                ui.vertical(|ui| {
+                    // 右栏：停站表占满，经由入口固定在表格下方。
+                    let total = ui.available_height();
+                    let has_via = !extras.via.is_empty();
+                    let trigger_height = if has_via {
+                        theme::CONTROL_HEIGHT + theme::GAP_S
+                    } else {
+                        0.0
+                    };
+                    let stops_height = (total - trigger_height).max(80.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), stops_height),
+                        Layout::top_down(Align::Min),
+                        |ui| stops_table_ui(ui, &detail.stops),
+                    );
+                    if has_via {
+                        ui.add_space(theme::GAP_S);
+                        via_page_trigger(ui, &extras.via, &mut via_page_open);
+                    }
+                });
+            });
+        } else {
+            // 宽屏侧栏：经由展开时独占下方的全部高度，停站表暂时让位。
+            // 两者各分一半时都只剩几行，谁也看不清；收起经由停站表就回来。
+            let has_via = !extras.via.is_empty();
+            let via_open = has_via
+                && ui.data(|data| {
+                    data.get_temp::<bool>(via_state_id(detail.summary.index))
+                        .unwrap_or(false)
+                });
+            header_ui(ui, detail, false, open, &mut close);
+            ui.add_space(theme::GAP_S);
+            ui.separator();
+            ui.add_space(theme::GAP_S);
+            extras_ui(ui, &detail.summary, extras, &detail.stops, date);
+            ui.add_space(theme::GAP_S);
+            ui.separator();
+            ui.add_space(theme::GAP_S);
+            if has_via {
+                via_section_ui(
+                    ui,
+                    &extras.via,
+                    &mut DetailToggles {
+                        stations_only: &mut stations_only,
+                        via_page_open: &mut via_page_open,
+                    },
+                    &detail.stops,
+                    detail.summary.index,
+                    via_open,
+                );
+            }
+            if !via_open {
+                if has_via {
+                    ui.add_space(theme::GAP_S);
+                    ui.separator();
+                    ui.add_space(theme::GAP_S);
+                }
+                stops_table_ui(ui, &detail.stops);
+            }
+        }
+
+        if via_page_open && !extras.via.is_empty() {
+            // 刚打开时记下尺寸；之后窗口一变化就关页，避免模态位置和大小错位。
+            if self.via_page_size.is_none() {
+                self.via_page_size = Some(screen);
+            }
+            via_page_ui(
+                ui,
+                detail,
+                extras,
+                &mut stations_only,
+                &mut via_page_open,
+                compact,
+            );
+        }
+        self.via_stations_only = stations_only;
+        self.via_page_open = via_page_open;
+        if !via_page_open {
+            self.via_page_size = None;
+        }
+        if close {
+            self.selected = None;
+            self.detail = None;
+            self.extras = TrainExtras::default();
+            self.via_page_open = false;
+            self.via_page_size = None;
+        }
+    }
+
+    fn db_error_ui(&mut self, ui: &mut Ui) {
+        let top = ((ui.available_height() - 260.0) * 0.3).clamp(32.0, 160.0);
+        ui.add_space(top);
+        ui.vertical_centered(|ui| {
+            ui.label(bold("无法打开时刻表数据库").size(theme::FONT_TITLE));
+            ui.add_space(theme::GAP_S);
+            if let Some(error) = &self.db_error {
+                ui.label(
+                    RichText::new(error)
+                        .size(theme::FONT_META)
+                        .color(ui.visuals().error_fg_color),
+                );
+            }
+            ui.add_space(theme::GAP_M);
+            ui.label(meta("当前数据库路径").weak());
+            ui.add_space(2.0);
+            ui.label(
+                RichText::new(self.db_path.display().to_string())
+                    .size(theme::FONT_META)
+                    .monospace(),
+            );
+            ui.add_space(theme::GAP_M);
+            ui.label(
+                RichText::new(
+                    "默认从 out/timetable/llt-timetable.sqlite 读取。\n\
+                     也可以指定路径：llt-gui --db <path>，或设置环境变量 LLT_DB。",
+                )
+                .size(theme::FONT_HINT)
+                .weak(),
+            );
+            ui.add_space(theme::GAP_M);
+            if ui.add(egui::Button::new("重试")).clicked() {
+                self.open_db();
+            }
+        });
+    }
+}
+
+impl eframe::App for LltApp {
+    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        if !self.window_fitted {
+            self.window_fitted = true;
+            fit_window(ui.ctx());
+        }
+        if self.db.is_none() {
+            egui::CentralPanel::default()
+                .frame(theme::panel_frame(ui))
+                .show(ui, |ui| self.db_error_ui(ui));
+            return;
+        }
+
+        egui::Panel::top("header")
+            .frame(theme::panel_frame(ui))
+            .show(ui, |ui| self.header(ui));
+
+        if self.detail.is_some() {
+            let available = ui.available_width();
+            if available >= WIDE_MIN_WIDTH {
+                // 宽屏：右侧详情栏占窗口宽度的约 36%，仍保证至少 320 点。
+                let detail_width = (available * 0.36).clamp(380.0, 560.0);
+                egui::Panel::right("detail_right")
+                    .resizable(true)
+                    .default_size(detail_width)
+                    .min_size(320.0)
+                    .max_size(640.0)
+                    .frame(theme::detail_frame(ui))
+                    .show(ui, |ui| self.detail_ui(ui, false));
+            } else {
+                // 窄屏：右侧栏会把结果表挤得不可用，改为底部详情面板。
+                let detail_height = (ui.available_height() * 0.62).clamp(180.0, 560.0);
+                egui::Panel::bottom("detail_bottom")
+                    .resizable(true)
+                    .default_size(detail_height)
+                    .min_size(90.0)
+                    .max_size(560.0)
+                    .frame(theme::detail_frame(ui))
+                    .show(ui, |ui| self.detail_ui(ui, true));
+            }
+        }
+
+        egui::CentralPanel::default()
+            .frame(theme::panel_frame(ui))
+            .show(ui, |ui| {
+                self.error_banner(ui);
+                match self.tab {
+                    Tab::Train => self.train_ui(ui),
+                    Tab::Station => self.station_ui(ui),
+                    Tab::Od => self.od_ui(ui),
+                }
+            });
+    }
+}
+
+// ---------------------------------------------------------------- 辅助函数
+
+/// 首帧根据屏幕大小收敛一次窗口尺寸，避免高 DPI/远程桌面下窗口超出屏幕。
+fn fit_window(ctx: &egui::Context) {
+    let Some(monitor) = ctx.input(|i| i.viewport().monitor_size) else {
+        return;
+    };
+    if monitor.x < 2.0 || monitor.y < 2.0 {
+        return;
+    }
+
+    // monitor_size 已经是逻辑点（egui 点），不要再除以 pixels_per_point。
+    // 留出标题栏和任务栏的余量，避免窗口底部超出屏幕。
+    let desired = egui::vec2(crate::DEFAULT_WINDOW_SIZE[0], crate::DEFAULT_WINDOW_SIZE[1]);
+    let target = egui::vec2(
+        desired.x.min((monitor.x * 0.94).max(480.0)),
+        desired.y.min((monitor.y * 0.84).max(300.0)),
+    );
+    let current = ctx.input(|i| {
+        i.viewport()
+            .inner_rect
+            .map(|rect| rect.size())
+            .unwrap_or(desired)
+    });
+
+    if (target.x - current.x).abs() > 2.0 || (target.y - current.y).abs() > 2.0 {
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(target));
+        // 自动缩小后把窗口挪到屏幕左上角附近，避免沿用原来的大窗口坐标。
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(16.0, 16.0)));
+    }
+}
+
+/// 出发站已定时，还能作为到达站出现的车站。
+fn od_to_available(hits: &[OdResult], from: Option<&str>) -> BTreeSet<String> {
+    hits.iter()
+        .filter(|hit| from.is_none_or(|name| hit.from_station == name))
+        .map(|hit| hit.to_station.clone())
+        .collect()
+}
+
+/// 到达站已定时，还能作为出发站出现的车站。
+fn od_from_available(hits: &[OdResult], to: Option<&str>) -> BTreeSet<String> {
+    hits.iter()
+        .filter(|hit| to.is_none_or(|name| hit.to_station == name))
+        .map(|hit| hit.from_station.clone())
+        .collect()
+}
+
+/// 半角/全角归一化，并去掉所有空白。
+fn normalize_code(input: &str) -> String {
+    normalize_width(input)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
+/// 站名只做全角转半角并去掉首尾空白，中文本身不改动。
+fn normalize_station(input: &str) -> String {
+    normalize_width(input).trim().to_owned()
+}
+
+fn normalize_width(input: &str) -> String {
+    input
+        .chars()
+        .map(|c| match c {
+            '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+            '\u{3000}' => ' ',
+            _ => c,
+        })
+        .collect()
+}
+
+fn time_with_day(time: &str, day: i64) -> String {
+    if day > 1 {
+        format!("{time} +{}天", day - 1)
+    } else {
+        time.to_owned()
+    }
+}
+
+fn fmt_duration(minutes: i64) -> String {
+    let minutes = minutes.max(0);
+    let days = minutes / 1440;
+    let hours = (minutes % 1440) / 60;
+    let mins = minutes % 60;
+
+    if days > 0 {
+        format!("{days}天{hours}小时{mins:02}分")
+    } else if hours > 0 {
+        format!("{hours}小时{mins:02}分")
+    } else {
+        format!("{mins}分")
+    }
+}
+
+/// 辅助信息（13 号字）：表头、日期区间、计数、字段名。
+fn meta(text: impl Into<String>) -> RichText {
+    RichText::new(text).size(theme::FONT_META)
+}
+
+/// 真粗体：`RichText::strong()` 只改颜色，真正加粗要指定字体族。
+fn bold(text: impl Into<String>) -> RichText {
+    RichText::new(text).family(fonts::bold_family())
+}
+
+fn table_head(ui: &mut Ui, text: &str) {
+    let color = theme::meta_color(ui);
+    ui.label(bold(text).size(theme::FONT_META).color(color));
+}
+
+fn table_head_right(ui: &mut Ui, text: &str) {
+    let color = theme::meta_color(ui);
+    right_label(ui, bold(text).size(theme::FONT_META).color(color));
+}
+
+/// 详情标题区：车次号（粗体）+ 线路 + 开行区间 + 关闭按钮。
+///
+/// 不随宽度改变结构：车次号一行、线路一行、开行区间一行，窄侧栏与底部面板一致。
+fn header_ui(ui: &mut Ui, detail: &TrainDetail, compact: bool, open: String, close: &mut bool) {
+    let route = format!("{} → {}", detail.summary.first, detail.summary.last);
+    ui.horizontal(|ui| {
+        ui.label(bold(&detail.summary.code).size(theme::FONT_CODE));
+        if compact {
+            ui.add_space(theme::GAP_S);
+            ui.add(egui::Label::new(RichText::new(&route).size(theme::FONT_BODY)).truncate())
+                .on_hover_text(&route);
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui.add(egui::Button::new(meta("关闭"))).clicked() {
+                *close = true;
+            }
+        });
+    });
+    if !compact {
+        ui.add_space(2.0);
+        ui.label(RichText::new(&route).size(theme::FONT_BODY));
+    }
+    ui.add_space(2.0);
+    ui.label(meta(open).weak());
+}
+
+/// 停站表：车站 / 到达 / 发车 / 里程 / 天。
+fn stops_table_ui(ui: &mut Ui, stops: &[Stop]) {
+    let width = ui.available_width();
+    let last_seq = stops.last().map(|stop| stop.seq);
+    let show_km = width >= 380.0;
+    let header_top = ui.cursor().top();
+    let mut table = TableBuilder::new(ui)
+        .id_salt("train_stops")
+        .striped(true)
+        .auto_shrink([false, false])
+        .min_scrolled_height(0.0)
+        .cell_layout(cell_layout())
+        // 站名吸收列宽变化，时刻、里程、天数保持固定，便于纵向比较。
+        .column(Column::remainder().at_least(88.0))
+        .column(Column::initial(66.0).at_least(62.0))
+        .column(Column::initial(66.0).at_least(62.0));
+    if show_km {
+        table = table.column(Column::initial(66.0));
+    }
+    table = table.column(Column::initial(58.0).at_least(54.0));
+
+    table
+        .header(theme::DETAIL_HEADER_HEIGHT, |mut header| {
+            header.col(|ui| table_head(ui, "车站"));
+            header.col(|ui| table_head(ui, "到达"));
+            header.col(|ui| table_head(ui, "发车"));
+            if show_km {
+                header.col(|ui| table_head_right(ui, "里程"));
+            }
+            header.col(|ui| table_head_right(ui, "天"));
+        })
+        .body(|body| {
+            body.rows(theme::DETAIL_ROW_HEIGHT, stops.len(), |mut row| {
+                let index = row.index();
+                let stop = &stops[index];
+                // 跨日边界画一条分隔线，配合「第 N 天」列读出换天位置。
+                row.set_overline(index > 0 && stop.day > stops[index - 1].day);
+                row.col(|ui| {
+                    let is_terminal = stop.seq == 1 || Some(stop.seq) == last_seq;
+                    let text = if is_terminal {
+                        bold(&stop.station)
+                    } else {
+                        RichText::new(&stop.station)
+                    };
+                    ui.add(egui::Label::new(text).truncate())
+                        .on_hover_text(format!("{} · 停留 {} 分", stop.station, stop.dwell_min));
+                });
+                row.col(|ui| {
+                    ui.label(RichText::new(&stop.arrive).monospace());
+                });
+                row.col(|ui| {
+                    ui.label(RichText::new(&stop.depart).monospace());
+                });
+                if show_km {
+                    row.col(|ui| {
+                        right_label(ui, format!("{} km", stop.km));
+                    });
+                }
+                row.col(|ui| {
+                    right_label(ui, format!("第 {} 天", stop.day));
+                });
+            });
+        });
+    paint_header_line(ui, header_top, theme::DETAIL_HEADER_HEIGHT);
+}
+
+/// 详情里的「标签 + 值」行：标签固定窄列、弱化，值可以换行。
+fn detail_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = theme::GAP_S;
+        ui.allocate_ui_with_layout(egui::vec2(38.0, 0.0), Layout::top_down(Align::Min), |ui| {
+            ui.add_space(1.0);
+            ui.label(meta(label).weak());
+        });
+        ui.vertical(|ui| add(ui));
+    });
+}
+
+/// 交路串：`G1806/7 → G82/79 → [G1] · 2026-06-13 起`，当前车次高亮。
+fn duty_chain_ui(ui: &mut Ui, duty: &Duty, extra_duties: bool, index: usize) {
+    // 交路只有一行文字，不需要按钮级别的行高。
+    ui.scope(|ui| {
+        ui.spacing_mut().interact_size.y = 22.0;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = theme::GAP_XS;
+            let highlight = ui.visuals().selection.bg_fill;
+            if extra_duties {
+                ui.label(meta(format!("{}.", index + 1)).weak());
+            }
+            for (position, segment) in duty.segments.iter().enumerate() {
+                if position > 0 {
+                    ui.label(RichText::new("→").size(theme::FONT_BODY).weak());
+                }
+                let text = RichText::new(&segment.label).size(theme::FONT_BODY);
+                if segment.current {
+                    ui.label(
+                        text.family(fonts::bold_family())
+                            .background_color(highlight),
+                    )
+                    .on_hover_text("当前车次");
+                } else {
+                    ui.label(text);
+                }
+            }
+            // 分隔符和日期作为一个整体换行，避免行末只剩一个「·」。
+            ui.add(
+                egui::Label::new(
+                    meta(format!("· {}", date_window(duty.start_date, duty.end_date))).weak(),
+                )
+                .wrap_mode(egui::TextWrapMode::Extend),
+            )
+            .on_hover_text(format!(
+                "该交路有效区间：{} ~ {}",
+                date_ymd(duty.start_date),
+                date_ymd(duty.end_date)
+            ));
+        });
+    });
+}
+
+/// 把 `京包张包段/包西线` 拆成线路集合。
+fn line_set(line: &str) -> std::collections::HashSet<&str> {
+    line.split('/')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+/// 经由表：站点 / 线路 / 里程。
+///
+/// 三种标记互不干扰：
+/// - 停站：本站是车次的办客停站，站名用强调色；
+/// - 换线：与上一行不是同一条线路，线路名用警示色；
+/// - 线路所 / 未收录站点：弱化斜体，勾上「只看车站」后隐藏。
+fn via_table_ui(
+    ui: &mut Ui,
+    via: &[ViaPoint],
+    stations_only: bool,
+    stops: &[Stop],
+    id: i64,
+    max_height: f32,
+    salt: &'static str,
+) {
+    let stop_names: std::collections::HashSet<&str> =
+        stops.iter().map(|stop| stop.station.as_str()).collect();
+
+    // 过滤后仍然按原始顺序显示，换线判断基于「上一行显示的点」，
+    // 这样隐藏线路所之后，新线路的首个可见站依然会被标出来。
+    let shown: Vec<&ViaPoint> = via
+        .iter()
+        .filter(|point| !stations_only || point.is_station)
+        .collect();
+
+    let width = ui.available_width();
+    let show_km = width >= 300.0;
+    let station_width = (width * 0.32).clamp(96.0, 132.0);
+    let header_top = ui.cursor().top();
+    // max_height 是「表头 + 表体」的总高度；max_scroll_height 只约束表体。
+    let pitch = theme::DETAIL_ROW_HEIGHT + ui.spacing().item_spacing.y;
+    let body_max = (max_height - theme::DETAIL_HEADER_HEIGHT).max(pitch);
+    let mut table = TableBuilder::new(ui)
+        .id_salt(("via_table", id, salt, width.round() as i32))
+        .striped(true)
+        .auto_shrink([false, false])
+        .min_scrolled_height(0.0)
+        .max_scroll_height(body_max)
+        .cell_layout(cell_layout())
+        .column(Column::initial(station_width).at_least(96.0))
+        .column(Column::remainder().at_least(96.0));
+    if show_km {
+        table = table.column(Column::initial(76.0));
+    }
+
+    table
+        .header(theme::DETAIL_HEADER_HEIGHT, |mut header| {
+            header.col(|ui| table_head(ui, "站点"));
+            header.col(|ui| table_head(ui, "线路"));
+            if show_km {
+                header.col(|ui| table_head_right(ui, "里程"));
+            }
+        })
+        .body(|body| {
+            body.rows(theme::DETAIL_ROW_HEIGHT, shown.len(), |mut row| {
+                let index = row.index();
+                let point = shown[index];
+                let is_stop = stop_names.contains(point.station.as_str());
+                // 跨线站的线路名会写成 `京包张包段/包西线`（两条线共用本站）。
+                // 因此换线 = 当前线路集合里有上一行没有的线路；这样
+                // 「A」→「A/B」会标在共用站，「A/B」→「B」则不会重复标。
+                let current = line_set(&point.line);
+                let new_lines: Vec<&str> = if index == 0 {
+                    Vec::new()
+                } else {
+                    let previous = line_set(&shown[index - 1].line);
+                    current
+                        .iter()
+                        .filter(|line| !previous.contains(*line))
+                        .copied()
+                        .collect()
+                };
+                let changed = !new_lines.is_empty();
+
+                row.col(|ui| {
+                    let text = RichText::new(&point.station);
+                    let text = if !point.is_station {
+                        text.weak().italics()
+                    } else if is_stop {
+                        text.color(ui.visuals().hyperlink_color)
+                    } else {
+                        text
+                    };
+                    ui.add(egui::Label::new(text).truncate())
+                        .on_hover_text(if point.is_station {
+                            if is_stop {
+                                "本站停靠"
+                            } else {
+                                "通过（不停站）"
+                            }
+                        } else {
+                            "线路所 / 未收录站点"
+                        });
+                });
+                row.col(|ui| {
+                    let text = RichText::new(&point.line);
+                    let text = if changed {
+                        text.color(ui.visuals().warn_fg_color)
+                    } else {
+                        text
+                    };
+                    ui.add(egui::Label::new(text).truncate())
+                        .on_hover_text(if changed {
+                            format!("由此进入 {}", new_lines.join(" / "))
+                        } else {
+                            point.line.clone()
+                        });
+                });
+                if show_km {
+                    row.col(|ui| {
+                        right_label(ui, format!("{} km", point.km));
+                    });
+                }
+            });
+        });
+    paint_header_line(ui, header_top, theme::DETAIL_HEADER_HEIGHT);
+}
+
+/// 经由的图例：圆点颜色和表格一一对应，文字保持常规颜色。
+fn via_legend_ui(ui: &mut Ui) {
+    let accent = ui.visuals().hyperlink_color;
+    let warn = ui.visuals().warn_fg_color;
+    let weak = ui.visuals().weak_text_color();
+    legend_item(ui, accent, "停站", "车次在该站办理客运，站名用蓝色");
+    legend_item(ui, warn, "换线", "由此进入另一条线路，线路名用橙色");
+    legend_item(
+        ui,
+        weak,
+        "线路所",
+        "线路所 / 信号所等非办客点，可被「只看车站」隐藏",
+    );
+}
+
+fn legend_item(ui: &mut Ui, color: Color32, label: &str, tip: &str) {
+    ui.label(RichText::new("●").size(10.0).color(color));
+    ui.add_space(3.0);
+    ui.label(meta(label)).on_hover_text(tip);
+    ui.add_space(theme::GAP_S);
+}
+
+/// 折叠标题的三角箭头（不依赖字体里的几何符号）。
+fn collapse_arrow(ui: &mut Ui, open: bool, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 18.0), Sense::hover());
+    let center = rect.center();
+    let radius = 3.5;
+    let points = if open {
+        vec![
+            egui::pos2(center.x - radius, center.y - radius * 0.55),
+            egui::pos2(center.x + radius, center.y - radius * 0.55),
+            egui::pos2(center.x, center.y + radius * 0.9),
+        ]
+    } else {
+        vec![
+            egui::pos2(center.x - radius * 0.55, center.y - radius),
+            egui::pos2(center.x - radius * 0.55, center.y + radius),
+            egui::pos2(center.x + radius * 0.9, center.y),
+        ]
+    };
+    ui.painter().add(egui::Shape::convex_polygon(
+        points,
+        color,
+        egui::Stroke::NONE,
+    ));
+}
+
+/// 宽屏侧栏的经由折叠状态按车次保存。
+fn via_state_id(train_index: i64) -> egui::Id {
+    egui::Id::unique(("llt-via", train_index))
+}
+
+/// 「27 点 · 1318 km · 车站 23」，折叠标题、窄屏入口和经由页共用。
+fn via_summary_text(via: &[ViaPoint]) -> String {
+    let total = via.last().map(|point| point.km).unwrap_or(0);
+    let stations = via.iter().filter(|point| point.is_station).count();
+    format!("{} 点 · {} km · 车站 {stations}", via.len(), total)
+}
+
+/// 整行可点击的折叠标题，返回当前是否展开。
+///
+/// 标题文字用子 UI 绘制，点击区域在这之后用 `interact` 叠在整行上，
+/// 这样点到文字也能切换；悬停底色在绘制内容前按指针位置判断。
+fn via_header_ui(ui: &mut Ui, id: egui::Id, summary: String) -> bool {
+    let stored = ui.data(|data| data.get_temp::<bool>(id)).unwrap_or(false);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), Sense::hover());
+    let hovered = ui.rect_contains_pointer(rect);
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(4),
+            ui.visuals().widgets.hovered.weak_bg_fill,
+        );
+    }
+    let weak = ui.visuals().weak_text_color();
+    let mut row = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    collapse_arrow(&mut row, stored, weak);
+    row.add_space(theme::GAP_XS);
+    row.label(bold("经由").size(theme::FONT_BODY));
+    row.add_space(theme::GAP_S);
+    row.label(meta(summary).weak());
+    drop(row);
+
+    let response = ui.interact(rect, id.with("hit"), Sense::click());
+    let open = if response.clicked() { !stored } else { stored };
+    if response.clicked() {
+        ui.data_mut(|data| data.insert_temp(id, open));
+    }
+    open
+}
+
+/// 交路 / 车型 / 餐车等信息行；经由由调用方在下方单独绘制。
+fn extras_ui(ui: &mut Ui, train: &TrainSummary, extras: &TrainExtras, stops: &[Stop], date: i64) {
+    let (duties, dining, matched) = extras.for_date(date);
+    ui.spacing_mut().item_spacing.y = 6.0;
+
+    // 用时：首末站之间的运行时间。跨天时补一个 (n 天) 说明，
+    // 避免「25小时38分」这类读数看不出实际跨了几天。
+    let run_min = stops.last().map(|stop| stop.arrive_min).unwrap_or(0)
+        - stops.first().map(|stop| stop.depart_min).unwrap_or(0);
+    let span_days = train.days.max(run_min / 1440 + 1);
+    // 统一按小时计（可超过 24），跨天时再补 (n 天)，避免「2天11小时」与
+    // 「59小时」两种口径混用。
+    let hours = run_min / 60;
+    let minutes = run_min % 60;
+    let duration = if hours > 0 {
+        format!("{hours}小时{minutes:02}分")
+    } else {
+        format!("{minutes}分")
+    };
+    let duration = if span_days > 1 {
+        format!("{duration} ({span_days}天)")
+    } else {
+        duration
+    };
+    detail_row(ui, "用时", |ui| {
+        ui.label(RichText::new(&duration).size(theme::FONT_BODY))
+            .on_hover_text("首站发车到末站到达，括号内为跨天天数");
+    });
+
+    if !duties.is_empty() {
+        let multiple = duties.len() > 1;
+        detail_row(ui, "交路", |ui| {
+            for (index, duty) in duties.iter().enumerate() {
+                if index > 0 {
+                    ui.add_space(theme::GAP_XS);
+                }
+                // 同号多区间时标出序号，避免两条交路看起来像一条。
+                duty_chain_ui(ui, duty, multiple, index);
+            }
+        });
+    }
+
+    // 车型：优先用交路里的编组（如 CR400BF-S型重联），没有就用车次类别。
+    let formation = duties
+        .iter()
+        .map(|duty| duty.formation.trim())
+        .find(|formation| !formation.is_empty());
+    let company = duties
+        .iter()
+        .map(|duty| duty.company.trim())
+        .find(|company| !company.is_empty());
+
+    detail_row(ui, "车型", |ui| {
+        match formation {
+            Some(formation) => {
+                ui.add(egui::Label::new(RichText::new(formation).size(theme::FONT_BODY)).wrap())
+                    .on_hover_text(formation);
+            }
+            // 没有编组信息时退回车次类别，保证这一行总有内容。
+            None => {
+                ui.label(RichText::new(&train.kind).size(theme::FONT_BODY));
+            }
+        }
+    });
+    if let Some(company) = company {
+        detail_row(ui, "担当", |ui| {
+            ui.label(RichText::new(company).size(theme::FONT_BODY));
+        });
+    }
+
+    if !dining.is_empty() {
+        let cars: Vec<&str> = dining.iter().map(|car| car.coach.trim()).collect();
+        let text = cars.join("、");
+        detail_row(ui, "餐车", |ui| {
+            ui.add(egui::Label::new(RichText::new(&text).size(theme::FONT_BODY)).truncate())
+                .on_hover_text(text);
+        });
+    }
+
+    if !matched && (!duties.is_empty() || !dining.is_empty()) {
+        detail_row(ui, "", |ui| {
+            ui.label(
+                meta("查询日期不在上述区间内，显示的是全部区间").color(ui.visuals().warn_fg_color),
+            );
+        });
+    }
+}
+
+/// 详情里由界面回写的两个开关，集中传递，避免参数继续膨胀。
+struct DetailToggles<'a> {
+    stations_only: &'a mut bool,
+    via_page_open: &'a mut bool,
+}
+
+/// 宽屏详情侧栏里的经由折叠项 + 图例 + 表格。
+///
+/// `fill` 为真时表格吃到面板剩余的全部高度（此时停站表不再绘制）；
+/// 为假时只画折叠标题本身。图例行右侧的「放大」打开封顶尺寸的居中弹窗。
+fn via_section_ui(
+    ui: &mut Ui,
+    via: &[ViaPoint],
+    toggles: &mut DetailToggles<'_>,
+    stops: &[Stop],
+    train_index: i64,
+    fill: bool,
+) {
+    if via.is_empty() {
+        return;
+    }
+    let open = via_header_ui(ui, via_state_id(train_index), via_summary_text(via));
+    if open {
+        ui.add_space(theme::GAP_XS);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().interact_size.y = 24.0;
+            ui.spacing_mut().item_spacing.x = theme::GAP_XS;
+            ui.checkbox(toggles.stations_only, meta("只看车站"));
+            ui.add_space(theme::GAP_M);
+            via_legend_ui(ui);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .add(egui::Button::new(meta("放大")).min_size(egui::vec2(48.0, 24.0)))
+                    .on_hover_text("在居中的大窗口里查看经由")
+                    .clicked()
+                {
+                    *toggles.via_page_open = true;
+                }
+            });
+        });
+        ui.add_space(theme::GAP_XS);
+        // 高度按整行取整，避免表格底部出现半截行。
+        let pitch = theme::DETAIL_ROW_HEIGHT + ui.spacing().item_spacing.y;
+        let max_height = if fill {
+            let raw = ui.available_height();
+            let rows = ((raw - theme::DETAIL_HEADER_HEIGHT) / pitch)
+                .floor()
+                .max(1.0);
+            theme::DETAIL_HEADER_HEIGHT + rows * pitch
+        } else {
+            let raw = (ui.available_height() * 0.5).clamp(104.0, 218.0);
+            let rows = ((raw - theme::DETAIL_HEADER_HEIGHT) / pitch)
+                .floor()
+                .clamp(1.0, 6.0);
+            theme::DETAIL_HEADER_HEIGHT + rows * pitch
+        };
+        via_table_ui(
+            ui,
+            via,
+            *toggles.stations_only,
+            stops,
+            train_index,
+            max_height,
+            "inline",
+        );
+    }
+}
+
+/// 窄屏时停站表下方的经由入口：整行可点，打开独立经由页。
+fn via_page_trigger(ui: &mut Ui, via: &[ViaPoint], open: &mut bool) {
+    if via.is_empty() {
+        return;
+    }
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), theme::CONTROL_HEIGHT),
+        Sense::hover(),
+    );
+    let hovered = ui.rect_contains_pointer(rect);
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(4),
+            ui.visuals().widgets.hovered.weak_bg_fill,
+        );
+    }
+    // 与表格内容之间加一条细线，避免入口像是浮在空白里。
+    ui.painter().hline(
+        rect.x_range(),
+        rect.top(),
+        egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+    );
+    let summary = via_summary_text(via);
+    let weak = ui.visuals().weak_text_color();
+    let mut row = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    row.add_space(theme::GAP_S);
+    row.label(bold("经由").size(theme::FONT_BODY));
+    row.add_space(theme::GAP_S);
+    row.add(egui::Label::new(meta(summary.clone()).weak()).truncate())
+        .on_hover_text(summary);
+    row.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        collapse_arrow(ui, false, weak);
+        ui.add_space(theme::GAP_XS);
+        ui.label(meta("查看").weak());
+        ui.add_space(theme::GAP_S);
+    });
+    drop(row);
+
+    // 子 UI 会挡住 allocate 的响应，和折叠标题一样在最后叠一层交互。
+    let response = ui.interact(
+        rect,
+        ui.make_persistent_id("llt-via-page-trigger"),
+        Sense::click(),
+    );
+    if response.clicked() {
+        *open = true;
+    }
+    response.on_hover_text("打开经由页");
+}
+
+/// 独立经由页。
+///
+/// 窄屏时覆盖整个内容区，给经由表足够高度；宽屏时封顶 760×82% 居中显示。
+/// 页面用 `Modal` 绘制：背景变暗并拦截下层输入，点返回/关闭、点遮罩或按 Esc 关闭。
+/// 窗口尺寸变化时由调用方关闭，避免模态停在旧位置。
+fn via_page_ui(
+    ui: &mut Ui,
+    detail: &TrainDetail,
+    extras: &TrainExtras,
+    stations_only: &mut bool,
+    open: &mut bool,
+    compact: bool,
+) {
+    let ctx = ui.ctx().clone();
+    let screen = ctx.content_rect().size();
+    // 窄屏留 12 点边距，基本就是整页；宽屏改成封顶 760×82% 的居中弹窗。
+    let page = if compact {
+        (screen - egui::vec2(24.0, 24.0)).max(egui::vec2(240.0, 240.0))
+    } else {
+        egui::vec2(
+            (screen.x - 24.0).min(760.0),
+            ((screen.y - 24.0) * 0.82).max(320.0),
+        )
+    };
+    let frame = egui::Frame::new()
+        .fill(ui.visuals().panel_fill)
+        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(12);
+    // 窄屏整页和宽屏弹窗用不同的 Area id，避免复用对方的尺寸/位置状态。
+    let response = egui::Modal::new(egui::Id::unique(("llt-via-page", compact)))
+        .frame(frame)
+        .backdrop_color(egui::Color32::from_black_alpha(120))
+        .show(&ctx, |ui| {
+            ui.set_min_size(page - egui::vec2(24.0, 24.0));
+            ui.horizontal(|ui| {
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new(if compact { "返回" } else { "关闭" })
+                                .size(theme::FONT_BODY),
+                        )
+                        .min_size(egui::vec2(64.0, theme::CONTROL_HEIGHT)),
+                    )
+                    .clicked()
+                {
+                    *open = false;
+                }
+                ui.add_space(theme::GAP_S);
+                ui.label(bold("经由").size(theme::FONT_TITLE));
+            });
+            ui.add_space(2.0);
+            let route = format!("{} → {}", detail.summary.first, detail.summary.last);
+            ui.horizontal(|ui| {
+                ui.label(bold(&detail.summary.code).size(theme::FONT_SECTION));
+                ui.add_space(theme::GAP_S);
+                ui.add(egui::Label::new(RichText::new(&route).size(theme::FONT_BODY)).truncate())
+                    .on_hover_text(&route);
+            });
+            ui.add_space(theme::GAP_XS);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::GAP_S;
+                ui.label(meta(via_summary_text(&extras.via)).weak());
+                ui.add_space(theme::GAP_M);
+                ui.spacing_mut().interact_size.y = 24.0;
+                ui.checkbox(stations_only, meta("只看车站"));
+            });
+            ui.add_space(theme::GAP_XS);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::GAP_XS;
+                via_legend_ui(ui);
+            });
+            ui.add_space(theme::GAP_S);
+            // 整页也按整行取整，避免首屏最下面出现半截行。
+            let height = ui.available_height();
+            let pitch = theme::DETAIL_ROW_HEIGHT + ui.spacing().item_spacing.y;
+            let rows = ((height - theme::DETAIL_HEADER_HEIGHT) / pitch)
+                .floor()
+                .max(1.0);
+            let max_height = theme::DETAIL_HEADER_HEIGHT + rows * pitch;
+            via_table_ui(
+                ui,
+                &extras.via,
+                *stations_only,
+                &detail.stops,
+                detail.summary.index,
+                max_height,
+                "page",
+            );
+        });
+    if response.backdrop_response.clicked() || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        *open = false;
+    }
+}
+
+/// 两级空状态：标题 + 支持说明，纵向放在内容区偏上位置，避免大面积空白。
+fn empty_state(ui: &mut Ui, title: &str, hint: &str) {
+    let top = ((ui.available_height() - 80.0) * 0.34).clamp(32.0, 180.0);
+    ui.add_space(top);
+    ui.vertical_centered(|ui| {
+        ui.label(bold(title).size(theme::FONT_SECTION));
+        ui.add_space(theme::GAP_S);
+        ui.label(RichText::new(hint).size(theme::FONT_HINT).weak());
+    });
+}
+
+/// 表格单元格统一布局：水平靠左、垂直居中。
+///
+/// `egui_extras::TableBuilder` 的单元格默认继承外层 `ui.layout()`，在
+/// 垂直面板里就是 `top_down(Align::Min)`，会让表头和内容都贴在 cell 左上角；
+/// 显式指定这个布局后，单行的 `ui.label` 也会垂直居中。
+fn cell_layout() -> Layout {
+    Layout::left_to_right(Align::Center)
+}
+
+/// 列表表头下方的细线：给表头一个明确的下边界，避免表头“浮”在数据行上。
+fn paint_header_line(ui: &Ui, header_top: f32, height: f32) {
+    let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+    ui.painter()
+        .hline(ui.max_rect().x_range(), header_top + height, stroke);
+}
+
+/// 表格里的数值列右对齐，便于纵向比较。
+fn right_label(ui: &mut Ui, text: impl Into<egui::WidgetText>) {
+    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        ui.label(text);
+    });
+}
+
+fn train_code_cell(ui: &mut Ui, code: &str, extra: Option<&str>) {
+    let response = ui.add(egui::Label::new(bold(code).size(theme::FONT_BODY)).truncate());
+    match extra {
+        Some(extra) => response.on_hover_text(format!("{code} · {extra}")),
+        None => response.on_hover_text(code),
+    };
+}
+
+/// 始发 / 终到合并显示；窄列用省略号，悬停看全文。
+fn route_cell(ui: &mut Ui, first: &str, last: &str) {
+    let text = format!("{first} → {last}");
+    ui.add(egui::Label::new(text.as_str()).truncate())
+        .on_hover_text(&text);
+}
+
+/// 在合并后的列表上方显示两组数量；列表本身按“开行在前、不开行在后”排序。
+fn show_counts(ui: &mut Ui, prefix: Option<String>, running: usize, not_running: usize) {
+    let accent = theme::accent(ui);
+    let weak = theme::meta_color(ui);
+    // 计数只有一行文字，用比控件更矮的行高，避免结果列表上方出现多余留白。
+    ui.scope(|ui| {
+        ui.spacing_mut().interact_size.y = 22.0;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 5.0;
+            if let Some(prefix) = prefix {
+                ui.label(meta(prefix));
+                ui.add_space(theme::GAP_XS);
+                ui.label(RichText::new("·").weak());
+                ui.add_space(theme::GAP_XS);
+            }
+            ui.label(RichText::new("●").size(10.0).color(accent));
+            ui.label(meta(format!("当日开行 {running} 趟")));
+            ui.add_space(theme::GAP_M);
+            ui.label(RichText::new("○").size(10.0).color(weak));
+            ui.label(meta(format!("当日不开行 {not_running} 趟")).weak());
+        });
+    });
+    ui.add_space(theme::GAP_XS);
+}
+
+/// 合并列表中的状态圆点：● 当日开行，○ 当日不开行。
+fn status_cell(ui: &mut Ui, running: bool) {
+    let (symbol, color) = if running {
+        ("●", ui.visuals().hyperlink_color)
+    } else {
+        ("○", ui.visuals().weak_text_color())
+    };
+    ui.centered_and_justified(|ui| {
+        ui.label(RichText::new(symbol).size(12.0).color(color))
+            .on_hover_text(if running {
+                "当日开行"
+            } else {
+                "当日不开行"
+            })
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary(date_from: i64, date_to: i64) -> TrainSummary {
+        TrainSummary {
+            index: 1,
+            code: "X1".to_owned(),
+            kind: String::new(),
+            first: String::new(),
+            last: String::new(),
+            total_km: 0,
+            days: 1,
+            date_from,
+            date_to,
+        }
+    }
+
+    #[test]
+    fn running_window_is_inclusive() {
+        let train = summary(20261124, 20261125);
+        assert!(!train.runs_on(20261123));
+        assert!(train.runs_on(20261124));
+        assert!(train.runs_on(20261125));
+        assert!(!train.runs_on(20261126));
+    }
+}
