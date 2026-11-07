@@ -2,7 +2,6 @@
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Ui};
@@ -20,7 +19,7 @@ const OD_RESULT_LIMIT: usize = 500;
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 const STATION_SUGGESTIONS: usize = 24;
 /// 宽屏布局（右侧详情栏、自动聚焦输入框）的最小窗口宽度。
-const WIDE_MIN_WIDTH: f32 = 820.0;
+use theme::WIDE_MIN_WIDTH;
 /// 读系统栏缩进的最小间隔：软键盘、导航栏、旋转屏幕都会改它，但不必逐帧过 JNI。
 const INSET_PROBE_INTERVAL: Duration = Duration::from_millis(150);
 
@@ -177,10 +176,8 @@ pub struct LltApp {
     train_back: Option<(i64, String)>,
     error: Option<String>,
     window_fitted: bool,
-    /// 系统栏（状态栏 / 导航栏 / 软键盘）占的宽度来源；桌面是固定 0。
-    insets: crate::Insets,
-    /// 平台输入法桥；桌面是 `None`（egui-winit 自己处理 IME）。
-    ime: Option<Arc<dyn crate::ImeBridge>>,
+    /// 平台差异：安全区、输入法、指针类型。
+    platform: crate::Platform,
     /// 上一帧「有没有输入框拿着键盘焦点」，只在变化时通知平台。
     ime_focus: bool,
     /// 最近一次读到的缩进。
@@ -203,13 +200,12 @@ impl LltApp {
         cc: &eframe::CreationContext<'_>,
         db_path: PathBuf,
         config_path: PathBuf,
-        insets: crate::Insets,
-        ime: Option<Arc<dyn crate::ImeBridge>>,
+        platform: crate::Platform,
     ) -> Self {
         fonts::install(&cc.egui_ctx);
-        theme::install(&cc.egui_ctx);
+        theme::install(&cc.egui_ctx, platform.pointer);
         // 输入法上屏发生在别的线程：先把界面句柄交给它，它才催得动帧。
-        if let Some(ime) = &ime {
+        if let Some(ime) = &platform.ime {
             ime.attach_context(&cc.egui_ctx);
         }
 
@@ -257,14 +253,13 @@ impl LltApp {
             train_back: None,
             error: None,
             window_fitted: false,
-            insets,
+            platform,
             safe_area: crate::ScreenInsets::default(),
             inset_probe_at: None,
             config_path,
             persisted: settings,
             dirty_since: None,
             save_failed: false,
-            ime,
             ime_focus: false,
         };
         // 打开就能打字：焦点落在恢复出来的那一页的输入框。
@@ -315,7 +310,7 @@ impl LltApp {
     /// 事件晚一步推进去，这一帧就打不出来。桌面没有这个通道（`ime` 为 `None`），
     /// 走 egui-winit 的 `WindowEvent::Ime`。
     fn pump_ime(&mut self, ctx: &egui::Context) {
-        let Some(ime) = self.ime.clone() else {
+        let Some(ime) = self.platform.ime.clone() else {
             return;
         };
         let events: Vec<egui::Event> = ime
@@ -750,7 +745,7 @@ impl LltApp {
         });
 
         ui.add_space(theme::GAP_S);
-        let inline_date = ui.available_width() >= 640.0;
+        let inline_date = ui.available_width() >= theme::INLINE_DATE_MIN_WIDTH;
         ui.horizontal(|ui| {
             // 标签页之间只靠内边距分隔，避免多余的分隔线。
             ui.spacing_mut().item_spacing.x = 2.0;
@@ -916,7 +911,7 @@ impl LltApp {
         salt: &str,
     ) -> Option<i64> {
         let width = ui.available_width();
-        let wide = width >= 760.0;
+        let wide = width >= theme::TRAIN_COLUMNS_MIN_WIDTH;
         // 很窄（例如侧边详情把列表压到 430 点左右）时先收起开行日期，
         // 日期改在车次单元格的悬停提示里给出，避免日期被硬裁掉。
         let show_date = width >= 560.0;
@@ -945,7 +940,7 @@ impl LltApp {
         }
 
         table
-            .header(theme::LIST_HEADER_HEIGHT, |mut header| {
+            .header(theme::list_header_height(), |mut header| {
                 header.col(|ui| table_head(ui, "状态"));
                 header.col(|ui| table_head(ui, "车次"));
                 if wide {
@@ -961,7 +956,7 @@ impl LltApp {
                 }
             })
             .body(|body| {
-                body.rows(theme::LIST_ROW_HEIGHT, rows.len(), |mut row| {
+                body.rows(theme::list_row_height(), rows.len(), |mut row| {
                     let train = rows[row.index()];
                     let running = row.index() < running_count;
                     row.set_selected(selected == Some(train.index));
@@ -1001,7 +996,7 @@ impl LltApp {
                     }
                 });
             });
-        paint_header_line(ui, header_top, theme::LIST_HEADER_HEIGHT);
+        paint_header_line(ui, header_top, theme::list_header_height());
 
         clicked
     }
@@ -1229,7 +1224,7 @@ impl LltApp {
         // 窗口足够宽时才展示停留 / 第几天 / 类型，避免列被挤到互相覆盖；
         // 更窄时再收起本站里程，把宽度留给时刻和始发终到。
         let width = ui.available_width();
-        let wide = width >= 880.0;
+        let wide = width >= theme::STATION_COLUMNS_MIN_WIDTH;
         let show_km = width >= 560.0;
         // 极窄（例如 900 点窗口右侧详情占掉一半）时收起「始发 → 终到」，
         // 路线改在车次单元格的悬停提示里，避免表格横向溢出。
@@ -1268,7 +1263,7 @@ impl LltApp {
         }
 
         table
-            .header(theme::LIST_HEADER_HEIGHT, |mut header| {
+            .header(theme::list_header_height(), |mut header| {
                 header.col(|ui| table_head(ui, "状态"));
                 header.col(|ui| table_head(ui, "车次"));
                 if show_station {
@@ -1291,7 +1286,7 @@ impl LltApp {
                 }
             })
             .body(|body| {
-                body.rows(theme::LIST_ROW_HEIGHT, rows.len(), |mut row| {
+                body.rows(theme::list_row_height(), rows.len(), |mut row| {
                     let stop = rows[row.index()];
                     let running = row.index() < running_count;
                     row.set_selected(selected == Some(stop.train_index));
@@ -1347,7 +1342,7 @@ impl LltApp {
                     }
                 });
             });
-        paint_header_line(ui, header_top, theme::LIST_HEADER_HEIGHT);
+        paint_header_line(ui, header_top, theme::list_header_height());
 
         clicked
     }
@@ -1635,7 +1630,7 @@ impl LltApp {
         salt: &str,
     ) -> Option<i64> {
         let width = ui.available_width();
-        let wide = width >= 840.0;
+        let wide = width >= theme::OD_COLUMNS_MIN_WIDTH;
         // 区段就是查询条件本身，极窄时收起它，把空间留给时刻。
         let show_segment = width >= 560.0;
         // 极窄时把历时移到车次悬停提示里，保证五个基本列不横向溢出。
@@ -1668,7 +1663,7 @@ impl LltApp {
         }
 
         table
-            .header(theme::LIST_HEADER_HEIGHT, |mut header| {
+            .header(theme::list_header_height(), |mut header| {
                 header.col(|ui| table_head(ui, "状态"));
                 header.col(|ui| table_head(ui, "车次"));
                 header.col(|ui| table_head(ui, "出发"));
@@ -1685,7 +1680,7 @@ impl LltApp {
                 }
             })
             .body(|body| {
-                body.rows(theme::LIST_ROW_HEIGHT, rows.len(), |mut row| {
+                body.rows(theme::list_row_height(), rows.len(), |mut row| {
                     let hit = rows[row.index()];
                     let running = row.index() < running_count;
                     row.set_selected(selected == Some(hit.train_index));
@@ -1744,7 +1739,7 @@ impl LltApp {
                     }
                 });
             });
-        paint_header_line(ui, header_top, theme::LIST_HEADER_HEIGHT);
+        paint_header_line(ui, header_top, theme::list_header_height());
 
         clicked
     }
@@ -1777,12 +1772,12 @@ impl LltApp {
             date_window(detail.summary.date_from, detail.summary.date_to)
         );
 
-        if compact && ui.available_width() < 580.0 {
+        if compact && ui.available_width() < theme::STACKED_DETAIL_MAX_WIDTH {
             // 更窄时左右分栏会把停站表压到放不下，改成上下排列：
             // 信息区限高并可滚动，停站表拿到整行宽度，经由入口放在最下面。
             let has_via = !extras.via.is_empty();
             let trigger_height = if has_via {
-                theme::CONTROL_HEIGHT + theme::GAP_S
+                theme::control_height() + theme::GAP_S
             } else {
                 0.0
             };
@@ -1867,7 +1862,7 @@ impl LltApp {
                     let total = ui.available_height();
                     let has_via = !extras.via.is_empty();
                     let trigger_height = if has_via {
-                        theme::CONTROL_HEIGHT + theme::GAP_S
+                        theme::control_height() + theme::GAP_S
                     } else {
                         0.0
                     };
@@ -2165,8 +2160,10 @@ impl LltApp {
         let due = self
             .inset_probe_at
             .is_none_or(|at| at.elapsed() >= INSET_PROBE_INTERVAL);
-        if (self.insets.is_probe() && due) || self.safe_area == crate::ScreenInsets::default() {
-            self.safe_area = self.insets.read();
+        if (self.platform.insets.is_probe() && due)
+            || self.safe_area == crate::ScreenInsets::default()
+        {
+            self.safe_area = self.platform.insets.read();
             self.inset_probe_at = Some(Instant::now());
         }
         self.insets_points(ctx)
@@ -2476,7 +2473,7 @@ fn stops_table_ui(ui: &mut Ui, stops: &[Stop]) -> Option<String> {
     table = table.column(Column::initial(58.0).at_least(54.0));
 
     table
-        .header(theme::DETAIL_HEADER_HEIGHT, |mut header| {
+        .header(theme::detail_header_height(), |mut header| {
             header.col(|ui| table_head(ui, "车站"));
             header.col(|ui| table_head(ui, "到达"));
             header.col(|ui| table_head(ui, "发车"));
@@ -2486,7 +2483,7 @@ fn stops_table_ui(ui: &mut Ui, stops: &[Stop]) -> Option<String> {
             header.col(|ui| table_head_right(ui, "天"));
         })
         .body(|body| {
-            body.rows(theme::DETAIL_ROW_HEIGHT, stops.len(), |mut row| {
+            body.rows(theme::detail_row_height(), stops.len(), |mut row| {
                 let index = row.index();
                 let stop = &stops[index];
                 // 跨日边界画一条分隔线，配合「第 N 天」列读出换天位置。
@@ -2523,7 +2520,7 @@ fn stops_table_ui(ui: &mut Ui, stops: &[Stop]) -> Option<String> {
                 });
             });
         });
-    paint_header_line(ui, header_top, theme::DETAIL_HEADER_HEIGHT);
+    paint_header_line(ui, header_top, theme::detail_header_height());
     clicked
 }
 
@@ -2636,8 +2633,8 @@ fn via_table_ui(
     let station_width = (width * 0.32).clamp(96.0, 132.0);
     let header_top = ui.cursor().top();
     // max_height 是「表头 + 表体」的总高度；max_scroll_height 只约束表体。
-    let pitch = theme::DETAIL_ROW_HEIGHT + ui.spacing().item_spacing.y;
-    let body_max = (max_height - theme::DETAIL_HEADER_HEIGHT).max(pitch);
+    let pitch = theme::detail_row_height() + ui.spacing().item_spacing.y;
+    let body_max = (max_height - theme::detail_header_height()).max(pitch);
     let mut table = TableBuilder::new(ui)
         .id_salt(("via_table", id, salt, width.round() as i32))
         .striped(true)
@@ -2652,7 +2649,7 @@ fn via_table_ui(
     }
 
     table
-        .header(theme::DETAIL_HEADER_HEIGHT, |mut header| {
+        .header(theme::detail_header_height(), |mut header| {
             header.col(|ui| table_head(ui, "站点"));
             header.col(|ui| table_head(ui, "线路"));
             if show_km {
@@ -2660,7 +2657,7 @@ fn via_table_ui(
             }
         })
         .body(|body| {
-            body.rows(theme::DETAIL_ROW_HEIGHT, shown.len(), |mut row| {
+            body.rows(theme::detail_row_height(), shown.len(), |mut row| {
                 let index = row.index();
                 let point = shown[index];
                 let is_stop = stop_names.contains(point.station.as_str());
@@ -2721,7 +2718,7 @@ fn via_table_ui(
                 }
             });
         });
-    paint_header_line(ui, header_top, theme::DETAIL_HEADER_HEIGHT);
+    paint_header_line(ui, header_top, theme::detail_header_height());
 }
 
 /// 经由的图例：圆点颜色和表格一一对应，文字保持常规颜色。
@@ -2959,19 +2956,19 @@ fn via_section_ui(
         });
         ui.add_space(theme::GAP_XS);
         // 高度按整行取整，避免表格底部出现半截行。
-        let pitch = theme::DETAIL_ROW_HEIGHT + ui.spacing().item_spacing.y;
+        let pitch = theme::detail_row_height() + ui.spacing().item_spacing.y;
         let max_height = if fill {
             let raw = ui.available_height();
-            let rows = ((raw - theme::DETAIL_HEADER_HEIGHT) / pitch)
+            let rows = ((raw - theme::detail_header_height()) / pitch)
                 .floor()
                 .max(1.0);
-            theme::DETAIL_HEADER_HEIGHT + rows * pitch
+            theme::detail_header_height() + rows * pitch
         } else {
             let raw = (ui.available_height() * 0.5).clamp(104.0, 218.0);
-            let rows = ((raw - theme::DETAIL_HEADER_HEIGHT) / pitch)
+            let rows = ((raw - theme::detail_header_height()) / pitch)
                 .floor()
                 .clamp(1.0, 6.0);
-            theme::DETAIL_HEADER_HEIGHT + rows * pitch
+            theme::detail_header_height() + rows * pitch
         };
         via_table_ui(
             ui,
@@ -2991,7 +2988,7 @@ fn via_page_trigger(ui: &mut Ui, via: &[ViaPoint], open: &mut bool) {
         return;
     }
     let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), theme::CONTROL_HEIGHT),
+        egui::vec2(ui.available_width(), theme::control_height()),
         Sense::hover(),
     );
     let hovered = ui.rect_contains_pointer(rect);
@@ -3083,7 +3080,7 @@ fn via_page_ui(
                             RichText::new(if compact { "返回" } else { "关闭" })
                                 .size(theme::FONT_BODY),
                         )
-                        .min_size(egui::vec2(64.0, theme::CONTROL_HEIGHT)),
+                        .min_size(egui::vec2(64.0, theme::control_height())),
                     )
                     .clicked()
                 {
@@ -3116,11 +3113,11 @@ fn via_page_ui(
             ui.add_space(theme::GAP_S);
             // 整页也按整行取整，避免首屏最下面出现半截行。
             let height = ui.available_height();
-            let pitch = theme::DETAIL_ROW_HEIGHT + ui.spacing().item_spacing.y;
-            let rows = ((height - theme::DETAIL_HEADER_HEIGHT) / pitch)
+            let pitch = theme::detail_row_height() + ui.spacing().item_spacing.y;
+            let rows = ((height - theme::detail_header_height()) / pitch)
                 .floor()
                 .max(1.0);
-            let max_height = theme::DETAIL_HEADER_HEIGHT + rows * pitch;
+            let max_height = theme::detail_header_height() + rows * pitch;
             via_table_ui(
                 ui,
                 &extras.via,
@@ -3163,9 +3160,10 @@ fn link_cell(ui: &mut Ui, text: RichText, tip: impl Into<egui::WidgetText>) -> b
             .truncate()
             .selectable(false),
     );
-    // 只有字形本身是入口；命中区向外放宽一点（左右 2、上下 4），
-    // 免得「缩小热区」变成「点不中」。行高 26、行距 32，放宽后不会串到上一行。
-    let hit = label.rect.expand2(egui::vec2(2.0, 4.0));
+    // 只有字形本身是入口；命中区向外放宽一点（鼠标 2/4，触摸 6/8），
+    // 免得「缩小热区」变成「点不中」。放宽量仍小于行高的一半，不会串到相邻行。
+    let pad = theme::link_hot_pad();
+    let hit = label.rect.expand2(pad);
     let response = ui
         .interact(hit, ui.next_auto_id(), Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand)

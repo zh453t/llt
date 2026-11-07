@@ -108,18 +108,36 @@ pub trait ImeBridge: Send + Sync {
     fn attach_context(&self, ctx: &egui::Context);
 }
 
+/// 平台差异的唯一入口：界面只认这个结构体，不再各自传参。
+///
+/// 桌面与 Android 的差别全在这里：系统栏缩进、系统输入法、指针类型。以后再加
+/// 平台能力（剪贴板、返回键）加字段即可，`run_with` 与 `LltApp::new` 不必再改签名。
+pub struct Platform {
+    /// 系统栏（状态栏 / 导航栏 / 刘海 / 软键盘）占的像素；桌面恒为 0。
+    pub insets: Insets,
+    /// 系统输入法通道；桌面是 `None`（egui-winit 自己处理 IME）。
+    pub ime: Option<Arc<dyn ImeBridge>>,
+    /// 指针类型：决定控件尺寸、点击热区。
+    pub pointer: theme::Pointer,
+}
+
+impl Platform {
+    /// 桌面：没有安全区、没有额外输入法通道、鼠标。
+    pub fn desktop() -> Self {
+        Self {
+            insets: Insets::fixed(ScreenInsets::default()),
+            ime: None,
+            pointer: theme::Pointer::Mouse,
+        }
+    }
+}
+
 /// 桌面入口：解析 `--db` / `--config`，按「绿色版」语义定位数据库与配置文件。
 pub fn run_desktop() -> eframe::Result {
     let args = Args::parse();
     let db_path = resolve_db_path(args.db);
     let config_path = config::resolve_path(args.config.as_deref());
-    run_with(
-        options(),
-        db_path,
-        config_path,
-        Insets::fixed(ScreenInsets::default()),
-        None,
-    )
+    run_with(options(), db_path, config_path, Platform::desktop())
 }
 
 /// 窗口选项。桌面直接用它；Android 端拿到后只需补上 `android_app`。
@@ -161,13 +179,13 @@ fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
 ///
 /// 数据库与配置文件由调用方决定位置：桌面是「可执行文件旁」（绿色版），
 /// Android 是应用私有目录（`internal_data_path()`），两条路径都不做隐式搜索。
-/// `insets` 是系统栏占的像素（桌面传固定 0），`ime` 是平台输入法桥（桌面传 `None`）。
+/// 平台差异（安全区、输入法、指针类型）都在 [`Platform`] 里，桌面用
+/// [`Platform::desktop`]。
 pub fn run_with(
     options: eframe::NativeOptions,
     db_path: PathBuf,
     config_path: PathBuf,
-    insets: Insets,
-    ime: Option<Arc<dyn ImeBridge>>,
+    platform: Platform,
 ) -> eframe::Result {
     eframe::run_native(
         APP_TITLE,
@@ -177,8 +195,7 @@ pub fn run_with(
                 cc,
                 db_path,
                 config_path,
-                insets,
-                ime,
+                platform,
             )))
         }),
     )

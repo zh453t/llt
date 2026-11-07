@@ -25,17 +25,122 @@ pub const FONT_HINT: f32 = 14.0;
 pub const FONT_MONO: f32 = 14.0;
 
 // ---------------------------------------------------------------- 尺寸与间距
+//
+// 尺寸随指针类型取值（见 [`Pointer`]）：鼠标用紧凑的一套，触摸屏用大一号的一套。
+// 数值都留在下面这几个常量里，界面只调访问函数。
 
-/// 输入框、按钮、日期选择器统一高度。
-pub const CONTROL_HEIGHT: f32 = 30.0;
-/// 查询结果列表行高。
-pub const LIST_ROW_HEIGHT: f32 = 28.0;
-/// 列表表头高度。
-pub const LIST_HEADER_HEIGHT: f32 = 30.0;
-/// 详情里的停站表 / 经由表行高。
-pub const DETAIL_ROW_HEIGHT: f32 = 26.0;
+/// 鼠标下的输入框 / 按钮 / 日期选择器高度。
+const CONTROL_HEIGHT_MOUSE: f32 = 30.0;
+/// 触摸屏的控件高度：手指落点约 9 mm，30 点太紧。
+const CONTROL_HEIGHT_TOUCH: f32 = 44.0;
+/// 鼠标下的结果列表行高。
+const LIST_ROW_HEIGHT_MOUSE: f32 = 28.0;
+const LIST_ROW_HEIGHT_TOUCH: f32 = 42.0;
+/// 鼠标下的列表表头高度。
+const LIST_HEADER_HEIGHT_MOUSE: f32 = 30.0;
+const LIST_HEADER_HEIGHT_TOUCH: f32 = 38.0;
+/// 鼠标下的详情（停站表 / 经由表）行高。
+const DETAIL_ROW_HEIGHT_MOUSE: f32 = 26.0;
+const DETAIL_ROW_HEIGHT_TOUCH: f32 = 38.0;
 /// 详情表格表头高度。
-pub const DETAIL_HEADER_HEIGHT: f32 = 26.0;
+const DETAIL_HEADER_HEIGHT_MOUSE: f32 = 26.0;
+const DETAIL_HEADER_HEIGHT_TOUCH: f32 = 34.0;
+
+// ---------------------------------------------------------------- 指针类型
+
+/// 指针类型：决定控件尺寸、点击热区与滚动条宽度。
+///
+/// 触摸屏没有悬停，也没有滚轮；手指落点又比光标粗得多，所以同一套界面在两端的
+/// 尺寸必须不同。一个进程只有一种输入设备，`install` 时写一次即可。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Pointer {
+    #[default]
+    Mouse,
+    Touch,
+}
+
+/// 当前进程的指针类型，由 [`install`] 写入。
+static POINTER: std::sync::OnceLock<Pointer> = std::sync::OnceLock::new();
+
+/// 当前进程的指针类型；没调用过 [`install`]（例如单元测试）时按鼠标算。
+pub fn pointer() -> Pointer {
+    POINTER.get().copied().unwrap_or_default()
+}
+
+/// 输入框、按钮、日期选择器的统一高度。
+pub fn control_height() -> f32 {
+    match pointer() {
+        Pointer::Mouse => CONTROL_HEIGHT_MOUSE,
+        Pointer::Touch => CONTROL_HEIGHT_TOUCH,
+    }
+}
+
+/// 查询结果列表行高。
+pub fn list_row_height() -> f32 {
+    match pointer() {
+        Pointer::Mouse => LIST_ROW_HEIGHT_MOUSE,
+        Pointer::Touch => LIST_ROW_HEIGHT_TOUCH,
+    }
+}
+
+/// 列表表头高度。
+pub fn list_header_height() -> f32 {
+    match pointer() {
+        Pointer::Mouse => LIST_HEADER_HEIGHT_MOUSE,
+        Pointer::Touch => LIST_HEADER_HEIGHT_TOUCH,
+    }
+}
+
+/// 详情里的停站表 / 经由表行高。
+pub fn detail_row_height() -> f32 {
+    match pointer() {
+        Pointer::Mouse => DETAIL_ROW_HEIGHT_MOUSE,
+        Pointer::Touch => DETAIL_ROW_HEIGHT_TOUCH,
+    }
+}
+
+/// 详情表格表头高度。
+pub fn detail_header_height() -> f32 {
+    match pointer() {
+        Pointer::Mouse => DETAIL_HEADER_HEIGHT_MOUSE,
+        Pointer::Touch => DETAIL_HEADER_HEIGHT_TOUCH,
+    }
+}
+
+/// 滚动条宽度：触摸时拉宽，不然拖不住。
+pub fn scroll_bar_width() -> f32 {
+    match pointer() {
+        Pointer::Mouse => 10.0,
+        Pointer::Touch => 14.0,
+    }
+}
+
+/// 可点文字（站名、车次号）的命中区在字形外再扩多少。
+///
+/// 触摸时按手指放宽：上下各 8 点仍在行高之内，不会串到相邻行。
+pub fn link_hot_pad() -> Vec2 {
+    match pointer() {
+        Pointer::Mouse => Vec2::new(2.0, 4.0),
+        Pointer::Touch => Vec2::new(6.0, 8.0),
+    }
+}
+
+// ---------------------------------------------------------------- 布局阈值
+//
+// 同一套界面按宽度换布局。阈值集中在这里，免得散成一堆魔法数、各表各写一套。
+
+/// 详情从「底部面板」变成「右侧面板」的宽度；也是自动聚焦的门槛。
+pub const WIDE_MIN_WIDTH: f32 = 820.0;
+/// 更窄时详情改为竖排：信息在上、停站表在下。
+pub const STACKED_DETAIL_MAX_WIDTH: f32 = 580.0;
+/// 查询日期与标签页同一行的宽度。
+pub const INLINE_DATE_MIN_WIDTH: f32 = 640.0;
+/// 车次表开始显示「数据 / 开行日期」列的宽度。
+pub const TRAIN_COLUMNS_MIN_WIDTH: f32 = 760.0;
+/// 车站表开始显示「本站里程 / 类型」列的宽度。
+pub const STATION_COLUMNS_MIN_WIDTH: f32 = 880.0;
+/// 站站查询开始显示「里程 / 区段」列的宽度。
+pub const OD_COLUMNS_MIN_WIDTH: f32 = 840.0;
 
 /// 常用间距，全部取 4 的倍数。
 pub const GAP_XS: f32 = 4.0;
@@ -90,7 +195,8 @@ pub fn primary_text() -> Color32 {
 }
 
 /// 浅色 / 深色两套配色，其余字段沿用 egui 默认值。
-pub fn install(ctx: &egui::Context) {
+pub fn install(ctx: &egui::Context, pointer: Pointer) {
+    let _ = POINTER.set(pointer);
     ctx.style_mut_of(Theme::Light, |style| {
         apply_text_styles(style);
         apply_spacing(style);
@@ -141,15 +247,25 @@ fn apply_text_styles(style: &mut egui::Style) {
 
 fn apply_spacing(style: &mut egui::Style) {
     let spacing = &mut style.spacing;
-    spacing.item_spacing = Vec2::new(GAP_S, 6.0);
+    // 行高在触摸屏上大一号，行距同比放大，免得表格看起来贴在一起。
+    let gap_y = match pointer() {
+        Pointer::Mouse => 6.0,
+        Pointer::Touch => 8.0,
+    };
+    spacing.item_spacing = Vec2::new(GAP_S, gap_y);
     spacing.button_padding = Vec2::new(10.0, 5.0);
     // 输入框、按钮、日期选择器都以此为最小高度，保证同一行高度一致。
-    spacing.interact_size = Vec2::new(40.0, CONTROL_HEIGHT);
+    spacing.interact_size = Vec2::new(40.0, control_height());
     spacing.icon_width = 14.0;
     spacing.icon_width_inner = 8.0;
     spacing.indent = 16.0;
     spacing.window_margin = Margin::same(12);
     spacing.menu_margin = Margin::same(8);
+
+    let scroll = &mut spacing.scroll;
+    scroll.bar_width = scroll_bar_width();
+    scroll.floating_width = scroll_bar_width();
+    scroll.floating_allocated_width = scroll_bar_width() + 2.0;
 }
 
 struct WidgetPalette {

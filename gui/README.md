@@ -170,6 +170,11 @@ GUI 读 `trains`、`stops`、`stations` 三张主表；交路 / 车型 / 餐车 
   需要真正加粗的文字（应用标题、车次号、表头、终到站）额外加载
   `msyhbd.ttc` / `Dengb.ttf` / Noto Sans CJK Bold，注册为独立的粗体字族
   （`RichText::strong()` 只改颜色，不等于粗体）。
+- 平台差异只有一个入口：`Platform { insets, ime, pointer }`（`src/lib.rs`）。桌面与
+  Android 走同一套界面，差别只在安全区、输入法通道与指针类型三个字段上。
+- 控件高度、列表行高、详情行高、可点文字热区、滚动条宽度都随 `theme::pointer()` 取值：
+  鼠标 30 / 28 / 26，触摸屏 44 / 42 / 38。宽度阈值同样集中在 `theme`（`WIDE_MIN_WIDTH`、
+  `STACKED_DETAIL_MAX_WIDTH` 及各表的列阈值），界面里不写字面量。
 - 字号、行高、控件高度、间距和浅色/深色配色集中在 `src/theme.rs`：
   正文 15、辅助信息 13、标题 17/20、车次号 24，输入框与按钮统一 30 点高，
   表格表头 30 / 列表行 28、详情表头与行 26，所有区域共用同一套颜色与圆角。

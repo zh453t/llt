@@ -99,7 +99,25 @@ activity.getWindow().getDecorView().getRootWindowInsets()
 
 `egui::Margin` 是 `i8`，所以换算后按 127 点封顶（远超任何系统栏高度）。
 
-### 2.5 系统输入法
+### 2.5 触摸尺寸
+
+`Platform::pointer` 决定尺寸，数值全在 `theme.rs`：
+
+| | 鼠标（桌面） | 触摸（Android） |
+|---|---|---|
+| 控件高度（输入框 / 按钮 / 标签页） | 30 | 44 |
+| 列表行高 | 28 | 42 |
+| 详情行高（停站表 / 经由表） | 26 | 38 |
+| 表头高度 | 30 / 26 | 38 / 34 |
+| 可点文字热区外扩 | 2 × 4 | 6 × 8 |
+| 滚动条宽度 | 10 | 14 |
+
+行距（`item_spacing.y`）从 6 放到 8，滚动条拉宽到 14 点才拖得住。字号不变：
+Android 的逻辑宽度只有约 440 点，字号放大后表格列会先撑破。高度变了以后，
+所有“按行数算高度”的地方都走 `theme::detail_row_height() + item_spacing.y` 的
+pitch，行贴合（不留半行）仍然成立。
+
+### 2.6 系统输入法
 
 winit 0.30 的 Android 后端没有任何 IME 支持：既不会把输入法的合成串变成
 `WindowEvent::Ime`，`set_ime_allowed` 也只是对 DecorView 调一次 `showSoftInput`。
@@ -138,7 +156,7 @@ inputType=0x0
 `build.ps1` 的第 3 步用 `javac` + `d8` 把 `android/java/` 编成 `assets/ime.dex`，
 和数据库一起打进 APK；Java 只是一层薄胶水，界面与状态全在 Rust 侧。
 
-### 2.6 渲染
+### 2.7 渲染
 
 `eframe` 用 wgpu。`options()` 把 `device_descriptor` 改成用**适配器自己上报的上限**
 （`adapter.limits()`），而不是 wgpu 的默认上限：
@@ -238,6 +256,7 @@ emulator -avd llt -no-window -gpu swiftshader_indirect -no-audio -no-snapshot
 | 启动、中文显示 | 正常（`/system/fonts` 的 Noto Sans CJK） |
 | 解包数据库 | `已从 APK 解出数据库 20261108`，第二次启动直接复用 |
 | 触屏切页 / 输入 / 查询 | 正常；点输入框弹出系统输入法，`input text` 能查 `G1`（694 条匹配） |
+| 触摸尺寸 | 控件 44 / 列表行 42 / 详情行 38 / 滚动条 14：按钮、标签页、结果行一眼看得出是给手指的；窄屏仍只显示必要的列 |
 | 中文输入法 | 真机（vivo PD2509，系统输入法 `com.vivo.ai.ime.nex`）：拼音合成串能实时进输入框，提交候选词后中文字立即上屏；`dumpsys input_method` 里 `mServedView=org.llt.timetable.ImeBridge`、`mServedInputConnection=…BridgeConnection`、`inputType=0x1` |
 | 详情 / 经由整页 | 正常；窄屏是底部面板，经由是整页模态，返回按钮不再压在状态栏下 |
 | 系统栏避让 | 状态栏 136 px、导航栏 132 px 时缩进正确，标题栏和「浅色」按钮完整可见 |
@@ -251,29 +270,26 @@ emulator -avd llt -no-window -gpu swiftshader_indirect -no-audio -no-snapshot
 
 按优先级：
 
-1. **触摸目标偏小**。控件高 30 点、列表行 28 点，桌面很合适，手指偏紧。
-   要动的是 `theme.rs` 里的几个常量（Android 上拉到 40–48），但 `theme` 目前是全局常量表，
-   得先让它们随平台/指针类型取值；改完要重看窄屏与横屏两档的排版。
-2. **返回键没有接线**。目前按返回键不会收起详情 / 经由页（winit 把 KEYCODE_BACK 当普通键，
+1. **返回键没有接线**。目前按返回键不会收起详情 / 经由页（winit 把 KEYCODE_BACK 当普通键，
    需要确认它是不是映射成 Esc）。合理行为：先关经由页，再收详情，最后才交给系统退出。
-3. **剪贴板**。Android 侧没有开 eframe 的 `clipboard`（arboard 没 Android 后端），
+2. **剪贴板**。Android 侧没有开 eframe 的 `clipboard`（arboard 没 Android 后端），
    输入框里不能长按复制/粘贴。要用得走 JNI 自己接 `ClipboardManager`；
    输入法桥已经收到 `commitText`，接剪贴板时顺手把 `ClipboardManager.getPrimaryClip()`
    也转成 `ImeInput::Commit` 即可。
-4. **输入法光标位置**。winit 的 `set_ime_cursor_area` 在 Android 上是空实现，
+3. **输入法光标位置**。winit 的 `set_ime_cursor_area` 在 Android 上是空实现，
    键盘始终停在屏幕底部，不会跟着输入框走；要做得自己给 `ImeBridge` 设
    `setImeOptions` / 手动移动窗口。
-5. **粗体是"假"粗体**（见 §2.3）。要么塞子集字体，要么接受。
-6. **签名与分发**。`android/keystore/llt-release.jks` 是脚本生成的自用证书，
+4. **粗体是"假"粗体**（见 §2.3）。要么塞子集字体，要么接受。
+5. **签名与分发**。`android/keystore/llt-release.jks` 是脚本生成的自用证书，
    密码写在 `android/Cargo.toml` 里。要分发给别人就换自己的 keystore 与密码，
    并且考虑 `apk_name`、版本号（现在是 0.1.0）与商店要求的 targetSdk。
-7. **cargo-apk 已废弃**（作者推荐 `xbuild`）。现在够用；等它真不工作了再换，
+6. **cargo-apk 已废弃**（作者推荐 `xbuild`）。现在够用；等它真不工作了再换，
    换的时候 `[package.metadata.android]` 这些配置基本能照搬。
-8. **模拟器与真机都只验证过一台**。其它 ROM（字体、刘海、手势导航、各家输入法）需要再跑：
+7. **模拟器与真机都只验证过一台**。其它 ROM（字体、刘海、手势导航、各家输入法）需要再跑：
    重点是 `/system/fonts` 里有没有 `NotoSansCJK-Regular.ttc`，以及 `getRootWindowInsets()`
    在各家的返回值。
-9. **后台保存**。Android 可能在没有任何回调的情况下杀进程；现在的配置是"停止输入 0.5 秒"
+8. **后台保存**。Android 可能在没有任何回调的情况下杀进程；现在的配置是"停止输入 0.5 秒"
    就落盘，够用，但没有 `onPause` 兜底（winit 会把 `MainEvent::Pause` 变成 Suspended）。
-10. **没有应用图标**。APK 用系统默认图标；加图标要往 `android/res/mipmap-*` 放 png
+9. **没有应用图标**。APK 用系统默认图标；加图标要往 `android/res/mipmap-*` 放 png
    并在 metadata 里写 `application.icon`。
 10. **i686 / armv7**。老机器和 32 位模拟器没编（`build_targets` 里没有）。

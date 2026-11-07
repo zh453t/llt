@@ -69,13 +69,13 @@ fn android_main(app: AndroidApp) {
     // dex 读不出来不中止启动：界面照常起来，只是打不了中文。
     let ime_dex = read_asset(&app.asset_manager(), IME_DEX_ASSET).ok();
     let ime = ime::attach(&app, ime_dex.as_deref());
-    if let Err(err) = llt_gui::run_with(
-        options,
-        db_path,
-        files.join(CONFIG_FILE),
+    let platform = llt_gui::Platform {
         insets,
-        ime.map(|bridge| bridge as std::sync::Arc<dyn llt_gui::ImeBridge>),
-    ) {
+        ime: ime.map(|bridge| bridge as std::sync::Arc<dyn llt_gui::ImeBridge>),
+        // 触屏：控件与行高用大一号的一套，点击热区也放宽。
+        pointer: llt_gui::theme::Pointer::Touch,
+    };
+    if let Err(err) = llt_gui::run_with(options, db_path, files.join(CONFIG_FILE), platform) {
         eprintln!("界面启动失败：{err}");
     }
 }

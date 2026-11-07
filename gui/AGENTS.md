@@ -47,13 +47,19 @@
 
 ## 平台差异（Android）
 
-- 界面代码不分平台，但 Android 上要考虑三件事：**系统栏安全区**（`ScreenInsets`，根
-  `Ui` 已经缩进，新建模态/弹窗时要用 `safe_screen()` 而不是 `ctx.content_rect()`）、
-  **软键盘**（高度算进 bottom 缩进）、**没有鼠标悬停**（悬停才出现的信息不能是唯一入口）。
-- 不要用 `cfg(target_os = "android")` 在界面里分叉；需要平台信息就在
-  `gui/src/lib.rs` 里用参数（如 `Insets`）传进来。
-- 字号/行高/控件高度仍是桌面尺寸，触摸目标偏小是已知限制，具体见
-  [`../docs/android.md`](../docs/android.md) §6。
+- 平台差异只有**一个入口**：`gui/src/lib.rs` 的 `Platform { insets, ime, pointer }`。
+  桌面用 `Platform::desktop()`，Android 在 `android/src/lib.rs` 里组装。以后再加平台
+  能力（剪贴板、返回键）往这个结构体加字段，不要往 `run_with` / `LltApp::new` 加参数。
+- 具体差异三件：**系统栏安全区**（`ScreenInsets`，根 `Ui` 已经缩进，新建模态/弹窗时要用
+  `safe_screen()` 而不是 `ctx.content_rect()`）、**软键盘**（高度算进 bottom 缩进）、
+  **没有鼠标悬停**（悬停才出现的信息不能是唯一入口，现有悬停提示都是补充说明）。
+- **不要用 `cfg(target_os = "android")` 在界面里分叉**；需要平台信息就走 `Platform`。
+- **尺寸随指针类型取值**：`theme::control_height()` / `list_row_height()` /
+  `detail_row_height()` / `link_hot_pad()` / `scroll_bar_width()`。鼠标 30/28/26、
+  触摸 44/42/38；新增控件高度时用这些函数，不要写死数字。
+- **宽度阈值集中**在 `theme`：`WIDE_MIN_WIDTH`、`STACKED_DETAIL_MAX_WIDTH`、
+  `INLINE_DATE_MIN_WIDTH`、`TRAIN_COLUMNS_MIN_WIDTH`、`STATION_COLUMNS_MIN_WIDTH`、
+  `OD_COLUMNS_MIN_WIDTH`。新增响应式列时从这里取，不要写字面量。
 
 ## 修改约束
 
