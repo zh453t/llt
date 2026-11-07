@@ -991,7 +991,8 @@ impl LltApp {
                             ui.label(meta(window));
                         });
                     }
-                    if row.response().clicked() {
+                    let r = row.response();
+                    if r.clicked() {
                         clicked = Some(train.index);
                     }
                 });
@@ -1747,7 +1748,7 @@ impl LltApp {
     /// `compact` 为真时（窗口窄、详情在底部），改为左右分栏：
     /// 左边是车次信息，右边是停站表；经由不再内嵌，而是在停站表下方
     /// 放一个入口，点开后用独立页面显示。更窄时改为上下排列。
-    fn detail_ui(&mut self, ui: &mut Ui, compact: bool) {
+    fn detail_ui(&mut self, ui: &mut Ui, compact: bool, close_label: &str) {
         let Some(detail) = &self.detail else {
             ui.label("未选择车次");
             return;
@@ -1771,16 +1772,17 @@ impl LltApp {
             "开行 {}",
             date_window(detail.summary.date_from, detail.summary.date_to)
         );
+        let mut header = HeaderState {
+            open,
+            close_label,
+            close: false,
+            back: None,
+        };
 
         if compact && ui.available_width() < theme::STACKED_DETAIL_MAX_WIDTH {
             // 更窄时左右分栏会把停站表压到放不下，改成上下排列：
             // 信息区限高并可滚动，停站表拿到整行宽度，经由入口放在最下面。
             let has_via = !extras.via.is_empty();
-            let trigger_height = if has_via {
-                theme::control_height() + theme::GAP_S
-            } else {
-                0.0
-            };
             // 信息区按内容收缩、最多占 45%，其余高度留给停站表；
             // 内容太长时信息区自己滚动，不会把表格挤没。
             let info_max = (ui.available_height() * 0.45).clamp(120.0, 240.0);
@@ -1788,10 +1790,8 @@ impl LltApp {
                 ui,
                 detail,
                 true,
-                open.clone(),
-                &mut close,
                 previous_code(&previous, detail),
-                &mut link,
+                &mut header,
             );
             ui.add_space(theme::GAP_S);
             ui.separator();
@@ -1807,7 +1807,13 @@ impl LltApp {
             ui.add_space(theme::GAP_S);
             ui.separator();
             ui.add_space(theme::GAP_S);
-            let table_height = (ui.available_height() - trigger_height).max(80.0);
+            // 经由入口放在表格**上面**：整页时表格会按可用高度铺满，放在下面会被
+            // 挤出可见区（实测指针能命中、但一个像素都画不出来）。
+            if has_via {
+                via_page_trigger(ui, &extras.via, &mut via_page_open);
+                ui.add_space(theme::GAP_S);
+            }
+            let table_height = ui.available_height().max(80.0);
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), table_height),
                 Layout::top_down(Align::Min),
@@ -1817,10 +1823,6 @@ impl LltApp {
                     }
                 },
             );
-            if has_via {
-                ui.add_space(theme::GAP_S);
-                via_page_trigger(ui, &extras.via, &mut via_page_open);
-            }
         } else if compact {
             let height = ui.available_height();
             let left_width = (ui.available_width() * 0.42).clamp(260.0, 460.0);
@@ -1833,10 +1835,8 @@ impl LltApp {
                             ui,
                             detail,
                             true,
-                            open.clone(),
-                            &mut close,
                             previous_code(&previous, detail),
-                            &mut link,
+                            &mut header,
                         );
                         ui.add_space(theme::GAP_S);
                         ui.separator();
@@ -1895,10 +1895,8 @@ impl LltApp {
                 ui,
                 detail,
                 false,
-                open,
-                &mut close,
                 previous_code(&previous, detail),
-                &mut link,
+                &mut header,
             );
             ui.add_space(theme::GAP_S);
             ui.separator();
@@ -1946,6 +1944,12 @@ impl LltApp {
                 compact,
                 screen,
             );
+        }
+        if header.close {
+            close = true;
+        }
+        if header.back.is_some() {
+            link = header.back;
         }
         self.via_stations_only = stations_only;
         self.via_page_open = via_page_open;
@@ -2211,7 +2215,13 @@ impl LltApp {
             .frame(theme::panel_frame(ui))
             .show(ui, |ui| self.header(ui));
 
-        if self.detail.is_some() {
+        // 触摸窄屏（手机）不建底部面板：列表和面板各分一半后谁都看不清，
+        // 改成「整车次一页」——详情直接replace掉列表，而不是叠一个会自己长高的模态。
+        // 触摸宽屏（平板横屏）右栏够用，仍保留列表与详情并排。
+        let touch_page = self.detail.is_some()
+            && self.platform.pointer == theme::Pointer::Touch
+            && ui.available_width() < WIDE_MIN_WIDTH;
+        if self.detail.is_some() && !touch_page {
             let available = ui.available_width();
             if available >= WIDE_MIN_WIDTH {
                 // 宽屏：右侧详情栏占窗口宽度的约 36%，仍保证至少 320 点。
@@ -2222,7 +2232,7 @@ impl LltApp {
                     .min_size(320.0)
                     .max_size(640.0)
                     .frame(theme::detail_frame(ui))
-                    .show(ui, |ui| self.detail_ui(ui, false));
+                    .show(ui, |ui| self.detail_ui(ui, false, "关闭"));
             } else {
                 // 窄屏：右侧栏会把结果表挤得不可用，改为底部详情面板。
                 let detail_height = (ui.available_height() * 0.62).clamp(180.0, 560.0);
@@ -2232,13 +2242,18 @@ impl LltApp {
                     .min_size(90.0)
                     .max_size(560.0)
                     .frame(theme::detail_frame(ui))
-                    .show(ui, |ui| self.detail_ui(ui, true));
+                    .show(ui, |ui| self.detail_ui(ui, true, "关闭"));
             }
         }
 
         egui::CentralPanel::default()
             .frame(theme::panel_frame(ui))
             .show(ui, |ui| {
+                if touch_page {
+                    // 整页详情：一页就是这一趟车，顶栏留着标签页与日期。
+                    self.detail_page_ui(ui);
+                    return;
+                }
                 self.error_banner(ui);
                 match self.tab {
                     Tab::Train => self.train_ui(ui),
@@ -2249,6 +2264,17 @@ impl LltApp {
                     Tab::Od => self.od_ui(ui),
                 }
             });
+    }
+
+    /// Android（触摸）上的车次详情：整页，而不是把列表压成半屏的底部面板。
+    ///
+    /// 手机的逻辑宽度只有约 440 点，底部面板和列表各分一半后停站表只剩几行。
+    /// 这里直接把列表换成详情（不是叠一个模态）：中央面板本来就给了确定的宽高，
+    /// 「按行取整」的停站表才有稳定高度。之前用模态时，模态是按内容自动长高的，
+    /// 停站表又拿 `available_height()` 算行数，两者互相喂——手指按住不放（每帧都在
+    /// 重绘）时整页会一路往上跑。
+    fn detail_page_ui(&mut self, ui: &mut Ui) {
+        self.detail_ui(ui, true, "返回");
     }
 }
 
@@ -2405,14 +2431,23 @@ fn previous_code<'a>(
 
 /// 详情标题栏。`previous` 是上一个看过的车次（索引、车次号），
 /// 有值时在「关闭」左边给一条「← G105」的回头路。
+/// 详情标题栏的入参与回执。
+///
+/// 摞成结构体是为了不把参数写成八股：`open` 是开行区间文案，`close_label` 决定
+/// 按钮写「关闭」还是「返回」（面板 / 整页），`close` 与 `back` 是这一帧的回执。
+struct HeaderState<'a> {
+    open: String,
+    close_label: &'a str,
+    close: bool,
+    back: Option<DetailLink>,
+}
+
 fn header_ui(
     ui: &mut Ui,
     detail: &TrainDetail,
     compact: bool,
-    open: String,
-    close: &mut bool,
     previous: Option<(i64, &str)>,
-    back: &mut Option<DetailLink>,
+    state: &mut HeaderState<'_>,
 ) {
     let route = format!("{} → {}", detail.summary.first, detail.summary.last);
     ui.horizontal(|ui| {
@@ -2423,8 +2458,8 @@ fn header_ui(
                 .on_hover_text(&route);
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui.add(egui::Button::new(meta("关闭"))).clicked() {
-                *close = true;
+            if ui.add(egui::Button::new(meta(state.close_label))).clicked() {
+                state.close = true;
             }
             if let Some((index, code)) = previous {
                 // `override_text_color` 会盖掉 `Link` 的回退色，这里显式指定。
@@ -2436,7 +2471,7 @@ fn header_ui(
                     .on_hover_text(format!("回到上一个车次 {code}"))
                     .clicked()
                 {
-                    *back = Some(DetailLink::PreviousTrain(index));
+                    state.back = Some(DetailLink::PreviousTrain(index));
                 }
             }
         });
@@ -2446,7 +2481,7 @@ fn header_ui(
         ui.label(RichText::new(&route).size(theme::FONT_BODY));
     }
     ui.add_space(2.0);
-    ui.label(meta(open).weak());
+    ui.label(meta(state.open.clone()).weak());
 }
 
 /// 停站表：车站 / 到达 / 发车 / 里程 / 天。

@@ -123,11 +123,19 @@ pub struct Platform {
 
 impl Platform {
     /// 桌面：没有安全区、没有额外输入法通道、鼠标。
+    ///
+    /// 设了环境变量 `LLT_TOUCH=1` 就按触摸屏算——用来在桌面复现 Android 的
+    /// 大尺寸/整页布局（窗口拉窄即可，见 `docs/android.md`）。
     pub fn desktop() -> Self {
+        let pointer = if std::env::var_os("LLT_TOUCH").is_some() {
+            theme::Pointer::Touch
+        } else {
+            theme::Pointer::Mouse
+        };
         Self {
             insets: Insets::fixed(ScreenInsets::default()),
             ime: None,
-            pointer: theme::Pointer::Mouse,
+            pointer,
         }
     }
 }

@@ -57,6 +57,9 @@
 - **尺寸随指针类型取值**：`theme::control_height()` / `list_row_height()` /
   `detail_row_height()` / `link_hot_pad()` / `scroll_bar_width()`。鼠标 30/28/26、
   触摸 44/42/38；新增控件高度时用这些函数，不要写死数字。
+- **触摸屏的详情是整页**（`detail_page_ui` 直接复用竖排分支，不要改成 `Modal`：模态按内容
+  自动长高，会和「按行取整」的停站表互相喂，长按页面会一路往上跑）。触摸屏同时关掉
+  `interaction.selectable_labels`，否则表格里每个 Label 都带 click sense，把点行手势吃掉。
 - **宽度阈值集中**在 `theme`：`WIDE_MIN_WIDTH`、`STACKED_DETAIL_MAX_WIDTH`、
   `INLINE_DATE_MIN_WIDTH`、`TRAIN_COLUMNS_MIN_WIDTH`、`STATION_COLUMNS_MIN_WIDTH`、
   `OD_COLUMNS_MIN_WIDTH`。新增响应式列时从这里取，不要写字面量。

@@ -172,6 +172,8 @@ GUI 读 `trains`、`stops`、`stations` 三张主表；交路 / 车型 / 餐车 
   （`RichText::strong()` 只改颜色，不等于粗体）。
 - 平台差异只有一个入口：`Platform { insets, ime, pointer }`（`src/lib.rs`）。桌面与
   Android 走同一套界面，差别只在安全区、输入法通道与指针类型三个字段上。
+- 触摸屏上列车详情是**整页**（替换列表，标题栏右侧是「返回」），桌面窄窗仍是底部面板；
+  触摸屏还关掉 `selectable_labels`，否则 `Label` 的 click sense 会吃掉「点行打开详情」。
 - 控件高度、列表行高、详情行高、可点文字热区、滚动条宽度都随 `theme::pointer()` 取值：
   鼠标 30 / 28 / 26，触摸屏 44 / 42 / 38。宽度阈值同样集中在 `theme`（`WIDE_MIN_WIDTH`、
   `STACKED_DETAIL_MAX_WIDTH` 及各表的列阈值），界面里不写字面量。

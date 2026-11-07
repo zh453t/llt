@@ -197,6 +197,16 @@ pub fn primary_text() -> Color32 {
 /// 浅色 / 深色两套配色，其余字段沿用 egui 默认值。
 pub fn install(ctx: &egui::Context, pointer: Pointer) {
     let _ = POINTER.set(pointer);
+    // 触摸屏上没有「拖选文字」这回事，而 selectable 的 Label 自带 click sense：
+    // 它会盖在表格行上面，把「点行打开详情」的手势吃掉——手指点在车次号、站名、
+    // 始发终到这些字上就没反应，只能点到字缝里。关掉它，整行都能点。
+    let touch = pointer == Pointer::Touch;
+    ctx.style_mut_of(Theme::Light, |style| {
+        style.interaction.selectable_labels = !touch;
+    });
+    ctx.style_mut_of(Theme::Dark, |style| {
+        style.interaction.selectable_labels = !touch;
+    });
     ctx.style_mut_of(Theme::Light, |style| {
         apply_text_styles(style);
         apply_spacing(style);

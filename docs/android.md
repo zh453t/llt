@@ -99,7 +99,23 @@ activity.getWindow().getDecorView().getRootWindowInsets()
 
 `egui::Margin` 是 `i8`，所以换算后按 127 点封顶（远超任何系统栏高度）。
 
-### 2.5 触摸尺寸
+### 2.5 详情整页
+
+触摸屏上「点一趟车」打开的是**整页详情**，不是桌面窄窗那种底部面板：手机的逻辑宽度
+只有约 440 点，列表和面板各分一半后停站表只剩两三行，还不如整页。
+
+实现上它就是把中央面板的内容换成详情（`detail_page_ui` 直接调竖排分支），而不是叠一个
+`Modal`：
+
+- 中央面板本来就给了**确定的宽高**，「按行取整」的停站表才有稳定高度；用模态时模态是
+  按内容自动长高的，停站表又拿 `available_height()` 算行数，两者互相喂——手指按住不放
+  （每帧都在重绘）时整页会一路往上跑，直到内容全跑出画面。
+- 退出只有标题栏的「返回」；没有「点外面关掉」这种语义，也就不用管模态背景层把
+  「点行打开详情」的那一下当成点外面（那是模态方案最先踩到的坑）。
+- 经由入口放在停站表**上面**：整页时表格会把可用高度铺满，放在下面会被挤出可见区
+  （指针还能命中，但一个像素都画不出来）。
+
+### 2.6 触摸尺寸
 
 `Platform::pointer` 决定尺寸，数值全在 `theme.rs`：
 
@@ -117,7 +133,7 @@ Android 的逻辑宽度只有约 440 点，字号放大后表格列会先撑破�
 所有“按行数算高度”的地方都走 `theme::detail_row_height() + item_spacing.y` 的
 pitch，行贴合（不留半行）仍然成立。
 
-### 2.6 系统输入法
+### 2.7 系统输入法
 
 winit 0.30 的 Android 后端没有任何 IME 支持：既不会把输入法的合成串变成
 `WindowEvent::Ime`，`set_ime_allowed` 也只是对 DecorView 调一次 `showSoftInput`。
@@ -156,7 +172,7 @@ inputType=0x0
 `build.ps1` 的第 3 步用 `javac` + `d8` 把 `android/java/` 编成 `assets/ime.dex`，
 和数据库一起打进 APK；Java 只是一层薄胶水，界面与状态全在 Rust 侧。
 
-### 2.7 渲染
+### 2.8 渲染
 
 `eframe` 用 wgpu。`options()` 把 `device_descriptor` 改成用**适配器自己上报的上限**
 （`adapter.limits()`），而不是 wgpu 的默认上限：
@@ -249,6 +265,16 @@ emulator -avd llt -no-window -gpu swiftshader_indirect -no-audio -no-snapshot
 
 ---
 
+### 4.1 在桌面上复现 Android 的排版
+
+设 `LLT_TOUCH=1` 再启动桌面版，`Platform::pointer` 就是触摸：控件 44 点、列表行 42 点、
+详情走整页。把窗口拉成 460×1000 就基本等于手机。配合截图脚本迭代比装 APK 快得多
+（`pwsh -File android/build.ps1` 一轮要几分钟）。
+
+```powershell
+$env:LLT_TOUCH='1'; .\target\release\llt-gui.exe
+```
+
 ## 5 验证记录
 
 | 项 | 结果 |
@@ -256,6 +282,7 @@ emulator -avd llt -no-window -gpu swiftshader_indirect -no-audio -no-snapshot
 | 启动、中文显示 | 正常（`/system/fonts` 的 Noto Sans CJK） |
 | 解包数据库 | `已从 APK 解出数据库 20261108`，第二次启动直接复用 |
 | 触屏切页 / 输入 / 查询 | 正常；点输入框弹出系统输入法，`input text` 能查 `G1`（694 条匹配） |
+| 详情整页 | 点列表任意位置（含车次号、站名这些字上）都能打开；整页显示车次号 / 开行 / 用时交路编组 / 经由入口 / 停站表，标题栏右侧「返回」回列表；按住不放不再上跑 |
 | 触摸尺寸 | 控件 44 / 列表行 42 / 详情行 38 / 滚动条 14：按钮、标签页、结果行一眼看得出是给手指的；窄屏仍只显示必要的列 |
 | 中文输入法 | 真机（vivo PD2509，系统输入法 `com.vivo.ai.ime.nex`）：拼音合成串能实时进输入框，提交候选词后中文字立即上屏；`dumpsys input_method` 里 `mServedView=org.llt.timetable.ImeBridge`、`mServedInputConnection=…BridgeConnection`、`inputType=0x1` |
 | 详情 / 经由整页 | 正常；窄屏是底部面板，经由是整页模态，返回按钮不再压在状态栏下 |
