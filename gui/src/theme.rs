@@ -223,7 +223,8 @@ fn light_visuals() -> egui::Visuals {
     visuals.faint_bg_color = Color32::from_rgb(0xf1, 0xf3, 0xf6);
     visuals.code_bg_color = Color32::from_rgb(0xf1, 0xf3, 0xf6);
     visuals.window_stroke = Stroke::new(1.0, line);
-    visuals.hyperlink_color = Color32::from_rgb(0x1e, 0x5c, 0xc7);
+    // 链接色与选中行文字/聚焦描边用同一支深蓝，同一界面不出现两种蓝。
+    visuals.hyperlink_color = Color32::from_rgb(0x1b, 0x45, 0x7d);
     visuals.warn_fg_color = Color32::from_rgb(0xa8, 0x5a, 0x0a);
     visuals.error_fg_color = Color32::from_rgb(0xb4, 0x23, 0x18);
     visuals.selection.bg_fill = Color32::from_rgb(0xdd, 0xe8, 0xf9);

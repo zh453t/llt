@@ -24,6 +24,44 @@ enum Tab {
     Od,
 }
 
+impl Tab {
+    fn label(self) -> &'static str {
+        match self {
+            Tab::Train => "按车次",
+            Tab::Station => "按车站",
+            Tab::Od => "站站查询",
+        }
+    }
+}
+
+/// 详情里点出去的去处。
+#[derive(Clone, PartialEq, Eq)]
+enum DetailLink {
+    /// 停站表里的车站：切到「按车站查询」，只看这一站。
+    Station(String),
+    /// 交路里的另一个车次（段首车次号）：就地换详情。
+    Train(String),
+    /// 详情标题旁的「← G105」：回到上一个看过的车次。
+    PreviousTrain(i64),
+}
+
+/// 从详情跳到车站页之前的现场：够一键回到「原来那一页、那一趟车」。
+struct ReturnPoint {
+    tab: Tab,
+    station_query: String,
+    station_fuzzy: bool,
+    /// 跳走时正在看的车次（重新打开的详情）。
+    train_index: i64,
+    /// 给按钮用的文案：上一个车站名（原来不在车站页时是上一页的名字）。
+    label: String,
+}
+
+/// 交路里以 `0` 开头的是回送 / 空送车，`DJ` 是检测车，都没有独立时刻表可查。
+fn jumpable_train_code(code: &str) -> bool {
+    let code = code.trim();
+    !code.is_empty() && !code.starts_with('0') && !code.to_ascii_uppercase().starts_with("DJ")
+}
+
 /// 需要自动接管的输入框：切标签页 / 启动 / 清空后把焦点还给它。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FocusField {
@@ -132,6 +170,10 @@ pub struct LltApp {
     via_page_size: Option<egui::Vec2>,
     /// 下一次绘制时要抢焦点的输入框；宽屏生效，用完即清。
     focus_request: Option<FocusField>,
+    /// 从详情跳去车站页之前的现场，用来一键回到原处。
+    return_point: Option<ReturnPoint>,
+    /// 上一个看过的车次（索引、车次号），详情标题旁显示「← G105」。
+    train_back: Option<(i64, String)>,
     error: Option<String>,
     window_fitted: bool,
 }
@@ -178,6 +220,8 @@ impl LltApp {
             via_page_size: None,
             // 启动即聚焦车次输入框，打开就能打字。
             focus_request: Some(FocusField::Train),
+            return_point: None,
+            train_back: None,
             error: None,
             window_fitted: false,
         };
@@ -437,9 +481,13 @@ impl LltApp {
     }
 
     fn select_train(&mut self, index: i64) {
-        if self.detail.as_ref().map(|d| d.summary.index) == Some(index) {
-            self.selected = Some(index);
-            return;
+        if let Some(detail) = &self.detail {
+            if detail.summary.index == index {
+                self.selected = Some(index);
+                return;
+            }
+            // 记住上一个车次，详情标题旁给一条回头路「← G105」。
+            self.train_back = Some((detail.summary.index, detail.summary.code.clone()));
         }
         self.via_page_open = false;
         self.via_page_size = None;
@@ -466,6 +514,16 @@ impl LltApp {
             self.detail = Some(detail);
             self.extras = extras;
         }
+    }
+
+    /// 收起详情：连带清掉经由页与「上一个车次」，避免下次打开时串味。
+    fn close_detail(&mut self) {
+        self.selected = None;
+        self.detail = None;
+        self.extras = TrainExtras::default();
+        self.via_page_open = false;
+        self.via_page_size = None;
+        self.train_back = None;
     }
 
     // ------------------------------------------------------------ 界面
@@ -1014,8 +1072,8 @@ impl LltApp {
             table = table.column(Column::initial(86.0).at_least(72.0));
         }
         table = table
-            .column(Column::initial(74.0).at_least(68.0))
-            .column(Column::initial(74.0).at_least(68.0));
+            .column(Column::initial(76.0).at_least(72.0))
+            .column(Column::initial(76.0).at_least(72.0));
         if wide {
             table = table
                 .column(Column::initial(64.0))
@@ -1074,11 +1132,14 @@ impl LltApp {
                             ui.add(egui::Label::new(&stop.station).truncate());
                         });
                     }
+                    // 车站表的「+N天」说的是“这趟车从始发算起第几天”，
+                    // 与「第几天」列同义，但窄屏收起那一列时它是唯一的跨天线索。
+                    let day_offset = stop.day - 1;
                     row.col(|ui| {
-                        ui.label(RichText::new(time_with_day(&stop.arrive, stop.day)).monospace());
+                        time_cell(ui, &stop.arrive, day_offset);
                     });
                     row.col(|ui| {
-                        ui.label(RichText::new(time_with_day(&stop.depart, stop.day)).monospace());
+                        time_cell(ui, &stop.depart, day_offset);
                     });
                     if wide {
                         row.col(|ui| {
@@ -1408,8 +1469,9 @@ impl LltApp {
             .column(Column::initial(82.0).at_least(74.0))
             .column(Column::initial(82.0).at_least(74.0));
         if show_duration {
-            // “18小时46分”“1天10小时05分”等最长历时需要约 100+ 点。
-            table = table.column(Column::initial(110.0).at_least(100.0));
+            // “18小时46分”“1天10小时05分”等最长历时需要约 104 点；
+            // 再窄就省略号收尾，同样的道理：撑破列宽会把后面几列顶偏、把选中底色切断。
+            table = table.column(Column::initial(112.0).at_least(104.0));
         }
         if wide {
             table = table
@@ -1462,18 +1524,16 @@ impl LltApp {
                         train_code_cell(ui, &hit.code, tip.as_deref());
                     });
                     row.col(|ui| {
-                        ui.label(
-                            RichText::new(time_with_day(&hit.depart, hit.depart_day)).monospace(),
-                        );
+                        // 出发日期就是查询日期，标「+N天」只会让人以为上车不是当天。
+                        time_cell(ui, &hit.depart, 0);
                     });
                     row.col(|ui| {
-                        ui.label(
-                            RichText::new(time_with_day(&hit.arrive, hit.arrive_day)).monospace(),
-                        );
+                        time_cell(ui, &hit.arrive, hit.arrive_day - hit.depart_day);
                     });
                     if show_duration {
                         row.col(|ui| {
-                            ui.label(&duration);
+                            ui.add(egui::Label::new(&duration).truncate())
+                                .on_hover_text(&duration);
                         });
                     }
                     if wide {
@@ -1514,6 +1574,10 @@ impl LltApp {
         };
 
         let mut close = false;
+        // 详情里的跳转先记下来，等 `self.detail` 的借用结束再执行。
+        let mut link: Option<DetailLink> = None;
+        // 标题栏的「← 上一个车次」：只在换过车次时出现。
+        let previous = self.train_back.clone();
         let mut stations_only = self.via_stations_only;
         let mut via_page_open = self.via_page_open;
         let screen = ui.ctx().content_rect().size();
@@ -1539,7 +1603,15 @@ impl LltApp {
             // 信息区按内容收缩、最多占 45%，其余高度留给停站表；
             // 内容太长时信息区自己滚动，不会把表格挤没。
             let info_max = (ui.available_height() * 0.45).clamp(120.0, 240.0);
-            header_ui(ui, detail, true, open.clone(), &mut close);
+            header_ui(
+                ui,
+                detail,
+                true,
+                open.clone(),
+                &mut close,
+                previous_code(&previous, detail),
+                &mut link,
+            );
             ui.add_space(theme::GAP_S);
             ui.separator();
             ui.add_space(theme::GAP_S);
@@ -1549,7 +1621,7 @@ impl LltApp {
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    extras_ui(ui, &detail.summary, extras, &detail.stops, date);
+                    extras_ui(ui, &detail.summary, extras, &detail.stops, date, &mut link);
                 });
             ui.add_space(theme::GAP_S);
             ui.separator();
@@ -1558,7 +1630,11 @@ impl LltApp {
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), table_height),
                 Layout::top_down(Align::Min),
-                |ui| stops_table_ui(ui, &detail.stops),
+                |ui| {
+                    if let Some(station) = stops_table_ui(ui, &detail.stops) {
+                        link = Some(DetailLink::Station(station));
+                    }
+                },
             );
             if has_via {
                 ui.add_space(theme::GAP_S);
@@ -1572,7 +1648,15 @@ impl LltApp {
                     egui::vec2(left_width, height),
                     Layout::top_down(Align::Min),
                     |ui| {
-                        header_ui(ui, detail, true, open.clone(), &mut close);
+                        header_ui(
+                            ui,
+                            detail,
+                            true,
+                            open.clone(),
+                            &mut close,
+                            previous_code(&previous, detail),
+                            &mut link,
+                        );
                         ui.add_space(theme::GAP_S);
                         ui.separator();
                         ui.add_space(theme::GAP_S);
@@ -1580,7 +1664,14 @@ impl LltApp {
                             .id_salt("detail_info_scroll")
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                extras_ui(ui, &detail.summary, extras, &detail.stops, date);
+                                extras_ui(
+                                    ui,
+                                    &detail.summary,
+                                    extras,
+                                    &detail.stops,
+                                    date,
+                                    &mut link,
+                                );
                             });
                     },
                 );
@@ -1598,7 +1689,11 @@ impl LltApp {
                     ui.allocate_ui_with_layout(
                         egui::vec2(ui.available_width(), stops_height),
                         Layout::top_down(Align::Min),
-                        |ui| stops_table_ui(ui, &detail.stops),
+                        |ui| {
+                            if let Some(station) = stops_table_ui(ui, &detail.stops) {
+                                link = Some(DetailLink::Station(station));
+                            }
+                        },
                     );
                     if has_via {
                         ui.add_space(theme::GAP_S);
@@ -1615,11 +1710,19 @@ impl LltApp {
                     data.get_temp::<bool>(via_state_id(detail.summary.index))
                         .unwrap_or(false)
                 });
-            header_ui(ui, detail, false, open, &mut close);
+            header_ui(
+                ui,
+                detail,
+                false,
+                open,
+                &mut close,
+                previous_code(&previous, detail),
+                &mut link,
+            );
             ui.add_space(theme::GAP_S);
             ui.separator();
             ui.add_space(theme::GAP_S);
-            extras_ui(ui, &detail.summary, extras, &detail.stops, date);
+            extras_ui(ui, &detail.summary, extras, &detail.stops, date, &mut link);
             ui.add_space(theme::GAP_S);
             ui.separator();
             ui.add_space(theme::GAP_S);
@@ -1642,7 +1745,9 @@ impl LltApp {
                     ui.separator();
                     ui.add_space(theme::GAP_S);
                 }
-                stops_table_ui(ui, &detail.stops);
+                if let Some(station) = stops_table_ui(ui, &detail.stops) {
+                    link = Some(DetailLink::Station(station));
+                }
             }
         }
 
@@ -1666,11 +1771,119 @@ impl LltApp {
             self.via_page_size = None;
         }
         if close {
-            self.selected = None;
-            self.detail = None;
-            self.extras = TrainExtras::default();
-            self.via_page_open = false;
-            self.via_page_size = None;
+            self.close_detail();
+        }
+        if let Some(link) = link {
+            self.follow_detail_link(link, compact);
+        }
+    }
+
+    /// 执行详情里的跳转。
+    ///
+    /// - 车站：切到「按车站查询」并只查这一站。宽屏保留右侧详情，方便对照原车次；
+    ///   窄屏先收起详情——底部面板要占掉大半高度，留着会把新的车站表压得只剩两三行。
+    /// - 车次：就地换详情，不动左侧列表。交路本身就是来回的路径，
+    ///   跳过去以后还能点回来；列表保留用户原先的查询结果。
+    fn follow_detail_link(&mut self, link: DetailLink, compact: bool) {
+        match link {
+            DetailLink::Station(name) => {
+                // 记下现场：跳过去以后左上角出现「← 上一个车站」。
+                // 文案只说车站这一维：原来在车站页就写站名，否则写上一页的名字；
+                // 不混车次号——在车站页看到车次号，会让人以为是要跳去那趟车。
+                if let Some(detail) = &self.detail {
+                    let label = if self.tab == Tab::Station && !self.station_query.trim().is_empty()
+                    {
+                        self.station_query.trim().to_string()
+                    } else {
+                        self.tab.label().to_string()
+                    };
+                    self.return_point = Some(ReturnPoint {
+                        tab: self.tab,
+                        station_query: self.station_query.clone(),
+                        station_fuzzy: self.station_fuzzy,
+                        train_index: detail.summary.index,
+                        label,
+                    });
+                }
+                if compact {
+                    self.close_detail();
+                }
+                self.tab = Tab::Station;
+                self.station_query = name;
+                // 点的是具体车站，就该只查这一站，不要展开同城组。
+                self.station_fuzzy = false;
+                self.station_city_suggestions.clear();
+                self.refresh_station();
+            }
+            DetailLink::Train(code) => self.jump_to_train(&code),
+            DetailLink::PreviousTrain(index) => self.select_train(index),
+        }
+    }
+
+    /// 回到跳走之前的那一页：标签页、车站查询词与模糊开关、正在看的车次。
+    fn go_back(&mut self) {
+        let Some(point) = self.return_point.take() else {
+            return;
+        };
+        self.tab = point.tab;
+        if self.station_query != point.station_query || self.station_fuzzy != point.station_fuzzy {
+            self.station_query = point.station_query;
+            self.station_fuzzy = point.station_fuzzy;
+            self.station_city_suggestions.clear();
+            self.refresh_station();
+        }
+        self.select_train(point.train_index);
+    }
+
+    /// 「← 天津」：跳到别的车站以后的一键回退（文案只写车站这一维）。
+    fn return_banner(&mut self, ui: &mut Ui) {
+        let Some(point) = &self.return_point else {
+            return;
+        };
+        let label = point.label.clone();
+        let mut go_back = false;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = theme::GAP_XS;
+            if ui
+                .add(egui::Button::new(meta(format!("← {label}"))))
+                .on_hover_text(format!("回到上一处：{label}"))
+                .clicked()
+            {
+                go_back = true;
+            }
+            ui.label(meta("刚才在停站表里点了车站").weak());
+        });
+        ui.add_space(theme::GAP_XS);
+        if go_back {
+            self.go_back();
+        }
+    }
+
+    /// 按交路段的车次号打开车次详情。
+    ///
+    /// 同一个车次号可能有多段开行区间（如 `G1057/G1…` 有两条），优先选当天开行的那一条；
+    /// 都不开行时退回第一条，详情里仍能看到完整信息。
+    fn jump_to_train(&mut self, code: &str) {
+        let Some(db) = &self.db else {
+            return;
+        };
+        let query = normalize_code(code);
+        let date = ymd(self.date);
+        match db.search_trains(&query, None) {
+            Ok(hits) => match hits
+                .iter()
+                .find(|train| train.runs_on(date))
+                .or(hits.first())
+            {
+                Some(train) => {
+                    let index = train.index;
+                    self.select_train(index);
+                }
+                None => {
+                    self.error = Some(format!("交路里的车次 {code} 在数据里查不到"));
+                }
+            },
+            Err(err) => self.error = Some(format!("查询车次失败：{err}")),
         }
     }
 
@@ -1760,7 +1973,10 @@ impl eframe::App for LltApp {
                 self.error_banner(ui);
                 match self.tab {
                     Tab::Train => self.train_ui(ui),
-                    Tab::Station => self.station_ui(ui),
+                    Tab::Station => {
+                        self.return_banner(ui);
+                        self.station_ui(ui);
+                    }
                     Tab::Od => self.od_ui(ui),
                 }
             });
@@ -1840,11 +2056,21 @@ fn normalize_width(input: &str) -> String {
         .collect()
 }
 
-fn time_with_day(time: &str, day: i64) -> String {
-    if day > 1 {
-        format!("{time} +{}天", day - 1)
-    } else {
-        time.to_owned()
+/// 时刻单元格：时间用等宽字体，「+N天」用更小一档的弱化文字紧跟其后。
+///
+/// 跨日时刻如果把「23:58 +2天」凑成一段等宽文字，宽度会超过列宽（74 点）；
+/// egui_extras 的单元格背景是按“列宽与内容宽度取并集”铺的，一旦内容超宽，
+/// 该单元格的占位就被撑到列外、后面几列整体右移——同一张表里跨日的行于是
+/// 看起来“排版不一样”，选中行的底色还会被撑开的缝隙切成几段。
+///
+/// `offset_days` 是相对该行基准日的天数，为 0 时不画后缀。基准日各表不同：
+/// 车站表是查询日期（即“本站第几天 - 1”），站站查询的到达是**上车日期**——
+/// 出发日期本来就等于查询日期，所以出发列不需要后缀，到达列才用“当天 / 次日到”。
+fn time_cell(ui: &mut Ui, time: &str, offset_days: i64) {
+    ui.spacing_mut().item_spacing.x = 2.0;
+    ui.label(RichText::new(time).monospace());
+    if offset_days > 0 {
+        ui.label(meta(format!("+{offset_days}天")).weak());
     }
 }
 
@@ -1886,7 +2112,28 @@ fn table_head_right(ui: &mut Ui, text: &str) {
 /// 详情标题区：车次号（粗体）+ 线路 + 开行区间 + 关闭按钮。
 ///
 /// 不随宽度改变结构：车次号一行、线路一行、开行区间一行，窄侧栏与底部面板一致。
-fn header_ui(ui: &mut Ui, detail: &TrainDetail, compact: bool, open: String, close: &mut bool) {
+/// 上一个看过的车次；和当前车次相同（理论上不会）时不显示，避免出现「← 自己」。
+fn previous_code<'a>(
+    previous: &'a Option<(i64, String)>,
+    detail: &TrainDetail,
+) -> Option<(i64, &'a str)> {
+    previous
+        .as_ref()
+        .filter(|(index, _)| *index != detail.summary.index)
+        .map(|(index, code)| (*index, code.as_str()))
+}
+
+/// 详情标题栏。`previous` 是上一个看过的车次（索引、车次号），
+/// 有值时在「关闭」左边给一条「← G105」的回头路。
+fn header_ui(
+    ui: &mut Ui,
+    detail: &TrainDetail,
+    compact: bool,
+    open: String,
+    close: &mut bool,
+    previous: Option<(i64, &str)>,
+    back: &mut Option<DetailLink>,
+) {
     let route = format!("{} → {}", detail.summary.first, detail.summary.last);
     ui.horizontal(|ui| {
         ui.label(bold(&detail.summary.code).size(theme::FONT_CODE));
@@ -1899,6 +2146,19 @@ fn header_ui(ui: &mut Ui, detail: &TrainDetail, compact: bool, open: String, clo
             if ui.add(egui::Button::new(meta("关闭"))).clicked() {
                 *close = true;
             }
+            if let Some((index, code)) = previous {
+                // `override_text_color` 会盖掉 `Link` 的回退色，这里显式指定。
+                let text = RichText::new(format!("← {code}"))
+                    .size(theme::FONT_META)
+                    .color(ui.visuals().hyperlink_color);
+                if ui
+                    .add(egui::Link::new(text))
+                    .on_hover_text(format!("回到上一个车次 {code}"))
+                    .clicked()
+                {
+                    *back = Some(DetailLink::PreviousTrain(index));
+                }
+            }
         });
     });
     if !compact {
@@ -1910,11 +2170,13 @@ fn header_ui(ui: &mut Ui, detail: &TrainDetail, compact: bool, open: String, clo
 }
 
 /// 停站表：车站 / 到达 / 发车 / 里程 / 天。
-fn stops_table_ui(ui: &mut Ui, stops: &[Stop]) {
+/// 停站表。返回被点中的车站名（只有站名字形是入口，其余单元格不响应点击）。
+fn stops_table_ui(ui: &mut Ui, stops: &[Stop]) -> Option<String> {
     let width = ui.available_width();
     let last_seq = stops.last().map(|stop| stop.seq);
     let show_km = width >= 380.0;
     let header_top = ui.cursor().top();
+    let mut clicked = None;
     let mut table = TableBuilder::new(ui)
         .id_salt("train_stops")
         .striped(true)
@@ -1953,8 +2215,14 @@ fn stops_table_ui(ui: &mut Ui, stops: &[Stop]) {
                     } else {
                         RichText::new(&stop.station)
                     };
-                    ui.add(egui::Label::new(text).truncate())
-                        .on_hover_text(format!("{} · 停留 {} 分", stop.station, stop.dwell_min));
+                    let tip = format!(
+                        "{} · 停留 {} 分
+点击查看该站的时刻表",
+                        stop.station, stop.dwell_min
+                    );
+                    if link_cell(ui, text, tip) {
+                        clicked = Some(stop.station.clone());
+                    }
                 });
                 row.col(|ui| {
                     ui.label(RichText::new(&stop.arrive).monospace());
@@ -1973,6 +2241,7 @@ fn stops_table_ui(ui: &mut Ui, stops: &[Stop]) {
             });
         });
     paint_header_line(ui, header_top, theme::DETAIL_HEADER_HEIGHT);
+    clicked
 }
 
 /// 详情里的「标签 + 值」行：标签固定窄列、弱化，值可以换行。
@@ -1988,7 +2257,11 @@ fn detail_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
 }
 
 /// 交路串：`G1806/7 → G82/79 → [G1] · 2026-06-13 起`，当前车次高亮。
-fn duty_chain_ui(ui: &mut Ui, duty: &Duty, extra_duties: bool, index: usize) {
+///
+/// 除当前车次外，其它车次都可以点过去（`0` 开头的回送车与 `DJ` 检测车除外），
+/// 返回被点中的段首车次号。
+fn duty_chain_ui(ui: &mut Ui, duty: &Duty, extra_duties: bool, index: usize) -> Option<String> {
+    let mut clicked = None;
     // 交路只有一行文字，不需要按钮级别的行高。
     ui.scope(|ui| {
         ui.spacing_mut().interact_size.y = 22.0;
@@ -2009,8 +2282,20 @@ fn duty_chain_ui(ui: &mut Ui, duty: &Duty, extra_duties: bool, index: usize) {
                             .background_color(highlight),
                     )
                     .on_hover_text("当前车次");
+                } else if jumpable_train_code(&segment.code) {
+                    // `override_text_color` 会盖掉 `Link` 的回退色，这里显式指定，
+                    // 保证和停站表里的车站链接是同一支深蓝；悬停时 Link 自己加下划线。
+                    let text = text.color(ui.visuals().hyperlink_color);
+                    if ui
+                        .add(egui::Link::new(text))
+                        .on_hover_text(format!("查看 {} 的时刻表", segment.label))
+                        .clicked()
+                    {
+                        clicked = Some(segment.code.clone());
+                    }
                 } else {
-                    ui.label(text);
+                    ui.label(text.weak())
+                        .on_hover_text("回送 / 检测车次，没有独立时刻表");
                 }
             }
             // 分隔符和日期作为一个整体换行，避免行末只剩一个「·」。
@@ -2027,6 +2312,7 @@ fn duty_chain_ui(ui: &mut Ui, duty: &Duty, extra_duties: bool, index: usize) {
             ));
         });
     });
+    clicked
 }
 
 /// 把 `京包张包段/包西线` 拆成线路集合。
@@ -2252,7 +2538,14 @@ fn via_header_ui(ui: &mut Ui, id: egui::Id, summary: String) -> bool {
 }
 
 /// 交路 / 车型 / 餐车等信息行；经由由调用方在下方单独绘制。
-fn extras_ui(ui: &mut Ui, train: &TrainSummary, extras: &TrainExtras, stops: &[Stop], date: i64) {
+fn extras_ui(
+    ui: &mut Ui,
+    train: &TrainSummary,
+    extras: &TrainExtras,
+    stops: &[Stop],
+    date: i64,
+    link: &mut Option<DetailLink>,
+) {
     let (duties, dining, matched) = extras.for_date(date);
     ui.spacing_mut().item_spacing.y = 6.0;
 
@@ -2288,7 +2581,9 @@ fn extras_ui(ui: &mut Ui, train: &TrainSummary, extras: &TrainExtras, stops: &[S
                     ui.add_space(theme::GAP_XS);
                 }
                 // 同号多区间时标出序号，避免两条交路看起来像一条。
-                duty_chain_ui(ui, duty, multiple, index);
+                if let Some(code) = duty_chain_ui(ui, duty, multiple, index) {
+                    *link = Some(DetailLink::Train(code));
+                }
             }
         });
     }
@@ -2574,6 +2869,35 @@ fn empty_state(ui: &mut Ui, title: &str, hint: &str) {
 /// `egui_extras::TableBuilder` 的单元格默认继承外层 `ui.layout()`，在
 /// 垂直面板里就是 `top_down(Align::Min)`，会让表头和内容都贴在 cell 左上角；
 /// 显式指定这个布局后，单行的 `ui.label` 也会垂直居中。
+/// 表格里的可跳转文字：常态用链接色，悬停补一条下划线 + 手型光标。
+///
+/// 用 `Label` 而不是 `egui::Link`，是为了保留 `.truncate()`——
+/// 窄列里的长站名要截断，链接不能把列撑破。
+fn link_cell(ui: &mut Ui, text: RichText, tip: impl Into<egui::WidgetText>) -> bool {
+    let color = ui.visuals().hyperlink_color;
+    let label = ui.add(
+        egui::Label::new(text.color(color))
+            .truncate()
+            .selectable(false),
+    );
+    // 只有字形本身是入口；命中区向外放宽一点（左右 2、上下 4），
+    // 免得「缩小热区」变成「点不中」。行高 26、行距 32，放宽后不会串到上一行。
+    let hit = label.rect.expand2(egui::vec2(2.0, 4.0));
+    let response = ui
+        .interact(hit, ui.next_auto_id(), Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(tip);
+    if response.hovered() || response.has_focus() {
+        let rect = label.rect;
+        ui.painter().hline(
+            rect.x_range(),
+            rect.bottom() - 1.0,
+            egui::Stroke::new(1.0, color),
+        );
+    }
+    response.clicked()
+}
+
 fn cell_layout() -> Layout {
     Layout::left_to_right(Align::Center)
 }
