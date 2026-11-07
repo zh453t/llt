@@ -5,9 +5,30 @@ edition.workspace = true
 description = "路路通离线时刻表查询（egui）"
 publish = false
 
+[lib]
+name = "llt_gui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "llt-gui"
+path = "src/main.rs"
+
 [dependencies]
-eframe.workspace = true
 egui_extras.workspace = true
 jiff.workspace = true
 rusqlite.workspace = true
 lltdb.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# 桌面与 Android 的渲染后端（wgpu）都要；其余特性按平台在下面分开给。
+eframe = { workspace = true, features = ["default_fonts", "wgpu"] }
+
+# 桌面：与 eframe 的默认特性一致（无障碍、剪贴板、系统字体、Linux 的 x11/wayland）。
+# `default-features` 在这里缺省为 true，正好把 workspace 里关掉的默认特性打开。
+[target.'cfg(not(target_os = "android"))'.dependencies]
+eframe = { workspace = true, default-features = true }
+
+# Android：NativeActivity 与 accesskit 互斥（eframe 里是 compile_error），
+# 剪贴板（arboard）也没有 Android 后端，所以只保留渲染与中文字体所需的部分。
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { workspace = true, features = ["android-native-activity"] }

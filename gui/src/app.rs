@@ -2,34 +2,35 @@
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Ui};
 use egui_extras::{Column, DatePickerButton, TableBuilder};
 use jiff::civil::Date;
 
-use crate::{fonts, theme};
+use crate::config::Tab;
+use crate::{config, fonts, theme};
 use lltdb::date::{date_window, date_ymd, origin_ymd, today, weekday_cn, ymd};
 use lltdb::extras::{DiningCar, Duty, ViaPoint};
 use lltdb::{Db, OdResult, StationStop, Stop, TrainDetail, TrainSummary};
 
 const OD_RESULT_LIMIT: usize = 500;
+/// 输入/点击停止多久之后才落盘：逐键写盘既浪费，也会把半截输入写进配置。
+const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 const STATION_SUGGESTIONS: usize = 24;
 /// 宽屏布局（右侧详情栏、自动聚焦输入框）的最小窗口宽度。
 const WIDE_MIN_WIDTH: f32 = 820.0;
+/// 读系统栏缩进的最小间隔：软键盘、导航栏、旋转屏幕都会改它，但不必逐帧过 JNI。
+const INSET_PROBE_INTERVAL: Duration = Duration::from_millis(150);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Tab {
-    Train,
-    Station,
-    Od,
-}
-
+/// 标签页的文案与焦点规则。可写入配置的那份定义在 [`config::Tab`]（带 serde + 默认值）。
 impl Tab {
     fn label(self) -> &'static str {
         match self {
+            Tab::Od => "站站查询",
             Tab::Train => "按车次",
             Tab::Station => "按车站",
-            Tab::Od => "站站查询",
         }
     }
 }
@@ -176,33 +177,65 @@ pub struct LltApp {
     train_back: Option<(i64, String)>,
     error: Option<String>,
     window_fitted: bool,
+    /// 系统栏（状态栏 / 导航栏 / 软键盘）占的宽度来源；桌面是固定 0。
+    insets: crate::Insets,
+    /// 平台输入法桥；桌面是 `None`（egui-winit 自己处理 IME）。
+    ime: Option<Arc<dyn crate::ImeBridge>>,
+    /// 上一帧「有没有输入框拿着键盘焦点」，只在变化时通知平台。
+    ime_focus: bool,
+    /// 最近一次读到的缩进。
+    safe_area: crate::ScreenInsets,
+    /// 上一次询问缩进的时间，用作最小间隔。
+    inset_probe_at: Option<Instant>,
+
+    /// 配置文件路径：默认紧挨可执行文件，见 [`config::resolve`]。
+    config_path: PathBuf,
+    /// 上一次交给写盘的状态；与当前状态不同就会触发一次去抖保存。
+    persisted: config::Settings,
+    /// 第一次发现改动的时间，用于 [`SAVE_DEBOUNCE`] 去抖。
+    dirty_since: Option<Instant>,
+    /// 已经提示过保存失败：同一条错误只打扰一次，写成功后再复位。
+    save_failed: bool,
 }
 
 impl LltApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, db_path: PathBuf) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        db_path: PathBuf,
+        config_path: PathBuf,
+        insets: crate::Insets,
+        ime: Option<Arc<dyn crate::ImeBridge>>,
+    ) -> Self {
         fonts::install(&cc.egui_ctx);
         theme::install(&cc.egui_ctx);
+        // 输入法上屏发生在别的线程：先把界面句柄交给它，它才催得动帧。
+        if let Some(ime) = &ime {
+            ime.attach_context(&cc.egui_ctx);
+        }
 
+        // 配置读取失败只降级，不阻断启动：返回默认值 + 一句提示。
+        let (settings, config_warning) = config::load(&config_path);
         let mut app = Self {
             db: None,
             db_path,
             db_error: None,
             data_version: None,
-            tab: Tab::Train,
+            // 上次停留的标签页；第一次启动是第一位（站站查询）。
+            tab: settings.ui.tab,
             date: today(),
-            train_query: String::new(),
+            train_query: settings.train.query.clone(),
             train_results: Vec::new(),
-            station_query: String::new(),
-            station_fuzzy: false,
+            station_query: settings.station.query.clone(),
+            station_fuzzy: settings.station.fuzzy,
             station_suggestions: Vec::new(),
             station_city_suggestions: Vec::new(),
             station_options: Vec::new(),
             station_selected: BTreeSet::new(),
             station_board_for: None,
             station_board: Vec::new(),
-            od_from: String::new(),
-            od_to: String::new(),
-            od_fuzzy: false,
+            od_from: settings.od.from.clone(),
+            od_to: settings.od.to.clone(),
+            od_fuzzy: settings.od.fuzzy,
             od_city_suggestions: Vec::new(),
             od_filter_from: None,
             od_filter_to: None,
@@ -215,17 +248,32 @@ impl LltApp {
             selected: None,
             detail: None,
             extras: TrainExtras::default(),
-            via_stations_only: true,
+            via_stations_only: settings.detail.via_stations_only,
             via_page_open: false,
             via_page_size: None,
-            // 启动即聚焦车次输入框，打开就能打字。
-            focus_request: Some(FocusField::Train),
+            // 恢复到上次停留的标签页；焦点在构造完再按当前页决定（见下）。
+            focus_request: None,
             return_point: None,
             train_back: None,
             error: None,
             window_fitted: false,
+            insets,
+            safe_area: crate::ScreenInsets::default(),
+            inset_probe_at: None,
+            config_path,
+            persisted: settings,
+            dirty_since: None,
+            save_failed: false,
+            ime,
+            ime_focus: false,
         };
+        // 打开就能打字：焦点落在恢复出来的那一页的输入框。
+        app.focus_request = Some(app.focus_field(app.tab));
         app.open_db();
+        // 提示放在 open_db 之后：恢复查询会先清空 `error`。
+        if let Some(warning) = config_warning {
+            app.error = Some(warning);
+        }
         app
     }
 
@@ -238,9 +286,145 @@ impl LltApp {
             Ok(db) => {
                 self.data_version = db.data_version();
                 self.db = Some(db);
+                // 配置里恢复出来的查询词要立刻查一次，否则页面上只有输入、没有结果。
+                // `open_db` 也是错误页「重试」的入口，所以恢复逻辑放在这里而非 new()。
+                self.refresh_restored_queries();
             }
             Err(err) => self.db_error = Some(err),
         }
+    }
+
+    /// 把配置文件恢复的查询词跑一遍；空查询跳过，重试成功后会再走一次。
+    fn refresh_restored_queries(&mut self) {
+        if !self.train_query.trim().is_empty() {
+            self.refresh_train_search();
+        }
+        if !self.station_query.trim().is_empty() {
+            self.refresh_station();
+        }
+        if !self.od_from.trim().is_empty() && !self.od_to.trim().is_empty() {
+            self.refresh_od();
+        }
+    }
+
+    // ------------------------------------------------------------ 输入法
+
+    /// 把平台输入法这一帧的上屏事件塞进 egui。
+    ///
+    /// 必须赶在所有控件之前：`TextEdit` 是在自己的 `show` 里读 `input.events` 的，
+    /// 事件晚一步推进去，这一帧就打不出来。桌面没有这个通道（`ime` 为 `None`），
+    /// 走 egui-winit 的 `WindowEvent::Ime`。
+    fn pump_ime(&mut self, ctx: &egui::Context) {
+        let Some(ime) = self.ime.clone() else {
+            return;
+        };
+        let events: Vec<egui::Event> = ime
+            .drain()
+            .into_iter()
+            .map(|input| match input {
+                crate::ImeInput::Commit(text) => egui::Event::Ime(egui::ImeEvent::Commit(text)),
+                crate::ImeInput::Preedit(text) => egui::Event::Ime(egui::ImeEvent::Preedit {
+                    text,
+                    active_range_chars: None,
+                }),
+                crate::ImeInput::Delete { before, after } => {
+                    egui::Event::Ime(egui::ImeEvent::DeleteSurrounding {
+                        before_chars: before,
+                        after_chars: after,
+                    })
+                }
+                crate::ImeInput::Enter => enter_key(),
+            })
+            .collect();
+        if !events.is_empty() {
+            ctx.input_mut(|input| input.events.extend(events));
+        }
+        // 焦点变化时过一次 JNI：Android 靠它把输入法连接挂到自己的 View 上、并弹键盘。
+        // 键盘被系统收掉（返回键）后焦点不变，所以再补一条：界面里点一下就重弹，
+        // 否则得先点别的输入框才回来。键盘上的点击不会进 egui，不会被这里反复触发。
+        let focused = ctx.memory(|memory| memory.focused()).is_some();
+        let clicked = ctx.input(|input| input.pointer.any_click());
+        if focused != self.ime_focus {
+            self.ime_focus = focused;
+            ime.set_text_focus(focused);
+        } else if focused && clicked {
+            ime.set_text_focus(true);
+        }
+    }
+
+    // ------------------------------------------------------------ 配置
+
+    /// 切到某个标签页时该抢焦点的输入框（站站查询落在还空着的那一侧）。
+    fn focus_field(&self, tab: Tab) -> FocusField {
+        match tab {
+            Tab::Train => FocusField::Train,
+            Tab::Station => FocusField::Station,
+            Tab::Od if self.od_from.trim().is_empty() => FocusField::OdFrom,
+            Tab::Od if self.od_to.trim().is_empty() => FocusField::OdTo,
+            Tab::Od => FocusField::OdFrom,
+        }
+    }
+
+    /// 当前需要落盘的状态。
+    fn settings(&self) -> config::Settings {
+        config::Settings {
+            version: config::CONFIG_VERSION,
+            ui: config::UiSettings { tab: self.tab },
+            train: config::TrainSettings {
+                query: self.train_query.clone(),
+            },
+            station: config::StationSettings {
+                query: self.station_query.clone(),
+                fuzzy: self.station_fuzzy,
+            },
+            od: config::OdSettings {
+                from: self.od_from.clone(),
+                to: self.od_to.clone(),
+                fuzzy: self.od_fuzzy,
+            },
+            detail: config::DetailSettings {
+                via_stations_only: self.via_stations_only,
+            },
+        }
+    }
+
+    /// 帧首调用：状态与上次落盘的快照不同时，停手 [`SAVE_DEBOUNCE`] 后写一次。
+    ///
+    /// 放在帧首而不是帧尾，是为了覆盖所有提前 `return` 的分支（库打不开时也会
+    /// 记下当前状态）；快照最多落后一帧，对这几个开关和输入框没有影响。
+    fn persist(&mut self, ctx: &egui::Context) {
+        let snapshot = self.settings();
+        if snapshot == self.persisted {
+            self.dirty_since = None;
+            return;
+        }
+        let now = Instant::now();
+        let since = *self.dirty_since.get_or_insert(now);
+        if now.duration_since(since) < SAVE_DEBOUNCE {
+            // 没有输入时界面不再重绘，这里补一次唤醒，保证去抖到点。
+            ctx.request_repaint_after(SAVE_DEBOUNCE);
+            return;
+        }
+        self.store(&snapshot);
+        self.dirty_since = None;
+    }
+
+    /// 写盘并记录「已处理过的快照」。
+    fn store(&mut self, snapshot: &config::Settings) {
+        if let Err(err) = config::save(&self.config_path, snapshot) {
+            // 只读目录（Program Files、只读共享盘）会一直失败：提示一次就够。
+            if !self.save_failed {
+                self.save_failed = true;
+                self.error = Some(format!(
+                    "保存配置失败（{}）：{err}。可以用 --config 或环境变量 LLT_CONFIG 换一个可写位置。",
+                    self.config_path.display()
+                ));
+            }
+        } else {
+            self.save_failed = false;
+        }
+        // 无论成功与否都记作「已处理」，否则失败时会每 500 ms 重试一次。
+        self.persisted = snapshot.clone();
     }
 
     // ------------------------------------------------------------ 查询
@@ -571,9 +755,9 @@ impl LltApp {
             // 标签页之间只靠内边距分隔，避免多余的分隔线。
             ui.spacing_mut().item_spacing.x = 2.0;
             let tabs = [
+                (Tab::Od, "站站查询"),
                 (Tab::Train, "按车次"),
                 (Tab::Station, "按车站"),
-                (Tab::Od, "站站查询"),
             ];
             for (tab, label) in tabs {
                 if ui
@@ -585,13 +769,7 @@ impl LltApp {
                     .clicked()
                 {
                     // 点标签页（含重复点当前页）就把焦点交回该页的输入框。
-                    self.focus_request = Some(match tab {
-                        Tab::Train => FocusField::Train,
-                        Tab::Station => FocusField::Station,
-                        Tab::Od if self.od_from.trim().is_empty() => FocusField::OdFrom,
-                        Tab::Od if self.od_to.trim().is_empty() => FocusField::OdTo,
-                        Tab::Od => FocusField::OdFrom,
-                    });
+                    self.focus_request = Some(self.focus_field(tab));
                 }
             }
 
@@ -1197,6 +1375,10 @@ impl LltApp {
                 self.od_last = OdField::From;
                 changed = true;
             }
+            // 在出发框按 Enter 等于「出发填完了」：焦点直接落到到达框。
+            // 单行输入框按 Enter 本来就会失焦，所以判 lost_focus + Enter 两个条件。
+            // 不受宽屏限制：此时键盘已经在这个输入框上，跳一格不会额外弹键盘。
+            let advance = from.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
             if ui.add(egui::Button::new(meta("交换"))).clicked() {
                 std::mem::swap(&mut self.od_from, &mut self.od_to);
@@ -1213,6 +1395,9 @@ impl LltApp {
             if to.changed() {
                 self.od_last = OdField::To;
                 changed = true;
+            }
+            if advance {
+                to.request_focus();
             }
 
             let can_query = !self.od_from.trim().is_empty() && !self.od_to.trim().is_empty();
@@ -1580,7 +1765,8 @@ impl LltApp {
         let previous = self.train_back.clone();
         let mut stations_only = self.via_stations_only;
         let mut via_page_open = self.via_page_open;
-        let screen = ui.ctx().content_rect().size();
+        // 模态窗按「去掉系统栏」的尺寸排版，否则整页会画到状态栏下面。
+        let screen = self.safe_screen(ui.ctx());
         if via_page_open && self.via_page_size != Some(screen) {
             via_page_open = false;
         }
@@ -1763,6 +1949,7 @@ impl LltApp {
                 &mut stations_only,
                 &mut via_page_open,
                 compact,
+                screen,
             );
         }
         self.via_stations_only = stations_only;
@@ -1927,10 +2114,95 @@ impl LltApp {
 
 impl eframe::App for LltApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.pump_ime(ui.ctx());
+        self.persist(ui.ctx());
         if !self.window_fitted {
             self.window_fitted = true;
             fit_window(ui.ctx());
         }
+
+        // Android 的窗口是 edge-to-edge 的：先给整个屏幕铺一层底色，再把内容
+        // 框缩进安全区，免得上栏被状态栏盖住、底部表格被导航条盖住。
+        let full = ui.max_rect();
+        let insets = self.safe_insets(ui.ctx());
+        if insets == egui::Margin::ZERO {
+            self.body(ui);
+            return;
+        }
+        ui.painter().rect_filled(full, 0.0, ui.visuals().panel_fill);
+        let safe = egui::Rect::from_min_max(
+            egui::pos2(
+                full.min.x + f32::from(insets.left),
+                full.min.y + f32::from(insets.top),
+            ),
+            egui::pos2(
+                full.max.x - f32::from(insets.right),
+                full.max.y - f32::from(insets.bottom),
+            ),
+        );
+        ui.scope_builder(egui::UiBuilder::new().max_rect(safe), |ui| self.body(ui));
+    }
+
+    /// 正常关窗时兜底一次（`persist` 的去抖窗口内可能还没写）。
+    ///
+    /// 签名随 eframe 的 `glow` feature 变化：本仓库只启用 wgpu 默认 feature，
+    /// 所以是无参版本；哪天 feature 统一把 `glow` 打开，这里会编译失败提醒改签名。
+    fn on_exit(&mut self) {
+        let snapshot = self.settings();
+        if snapshot != self.persisted {
+            self.store(&snapshot);
+        }
+    }
+}
+
+impl LltApp {
+    /// 系统栏缩进换算成逻辑点（egui 的 `Margin` 单位）。
+    ///
+    /// 有回调时最多每 [`INSET_PROBE_INTERVAL`] 问一次：`WindowInsets` 会因
+    /// 软键盘弹出、导航栏隐藏、旋转屏幕而变，这些都不是应用能直接感知的事件；
+    /// 帧本来就在跟着事件走，所以「每帧最多问一次」就够了，而且不逐帧过 JNI。
+    fn safe_insets(&mut self, ctx: &egui::Context) -> egui::Margin {
+        let due = self
+            .inset_probe_at
+            .is_none_or(|at| at.elapsed() >= INSET_PROBE_INTERVAL);
+        if (self.insets.is_probe() && due) || self.safe_area == crate::ScreenInsets::default() {
+            self.safe_area = self.insets.read();
+            self.inset_probe_at = Some(Instant::now());
+        }
+        self.insets_points(ctx)
+    }
+
+    /// 缩进换算成逻辑点（egui 的 `Margin` 单位）。只读，不触发询问。
+    fn insets_points(&self, ctx: &egui::Context) -> egui::Margin {
+        if self.safe_area == crate::ScreenInsets::default() {
+            return egui::Margin::ZERO;
+        }
+        let scale = 1.0 / ctx.pixels_per_point();
+        let points = |value: u32| (value as f32 * scale).round().clamp(0.0, 127.0) as i8;
+        egui::Margin {
+            left: points(self.safe_area.left),
+            right: points(self.safe_area.right),
+            top: points(self.safe_area.top),
+            bottom: points(self.safe_area.bottom),
+        }
+    }
+
+    /// 去掉系统栏后的逻辑屏幕尺寸，给模态窗（经由页 / 放大弹窗）排版用。
+    ///
+    /// egui 的 `content_rect()` 在 Android 上不会扣掉状态栏和导航栏（egui-winit
+    /// 只在 iOS 上填 `safe_area_insets`），所以这里自己扣。
+    fn safe_screen(&self, ctx: &egui::Context) -> egui::Vec2 {
+        let full = ctx.content_rect().size();
+        let insets = self.insets_points(ctx);
+        let used = egui::vec2(
+            f32::from(insets.left) + f32::from(insets.right),
+            f32::from(insets.top) + f32::from(insets.bottom),
+        );
+        (full - used).max(egui::vec2(240.0, 240.0))
+    }
+
+    /// 除系统栏缩进以外的主体布局。
+    fn body(&mut self, ui: &mut Ui) {
         if self.db.is_none() {
             egui::CentralPanel::default()
                 .frame(theme::panel_frame(ui))
@@ -2090,6 +2362,17 @@ fn fmt_duration(minutes: i64) -> String {
 }
 
 /// 辅助信息（13 号字）：表头、日期区间、计数、字段名。
+/// 一次「回车」按键事件；输入法的「完成」也走它，与实体回车等价。
+fn enter_key() -> egui::Event {
+    egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    }
+}
+
 fn meta(text: impl Into<String>) -> RichText {
     RichText::new(text).size(theme::FONT_META)
 }
@@ -2770,9 +3053,9 @@ fn via_page_ui(
     stations_only: &mut bool,
     open: &mut bool,
     compact: bool,
+    screen: egui::Vec2,
 ) {
     let ctx = ui.ctx().clone();
-    let screen = ctx.content_rect().size();
     // 窄屏留 12 点边距，基本就是整页；宽屏改成封顶 760×82% 的居中弹窗。
     let page = if compact {
         (screen - egui::vec2(24.0, 24.0)).max(egui::vec2(240.0, 240.0))

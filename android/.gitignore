@@ -1,0 +1,4 @@
+/target
+# assets 由 build.ps1 从 out/timetable 复制，本身有 .gitignore
+# 自用签名证书（build.ps1 -Release 首次运行时生成）
+/keystore

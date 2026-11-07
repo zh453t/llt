@@ -1,0 +1,8 @@
+# 打包进 APK 的运行时资源（由 `android/build.ps1` 生成，不进版本库）
+#
+#   timetable/llt-timetable.sqlite   ← out/timetable/llt-timetable.sqlite
+#   timetable/version                ← out/timetable/meta.json 的 data_version
+#   ime.dex                          ← android/java/ 编译出的输入法桥（运行时用
+#                                      InMemoryDexClassLoader 装进来，见 docs/android.md）
+*
+!.gitignore

@@ -1,6 +1,7 @@
 //! 中文字体与基础排版设置。
 //!
-//! 正文中文本来依赖 eframe 的 `system_fonts`：缺字时按需从系统字体里查找。
+//! 正文中文本来依赖 eframe 的 `system_fonts`：缺字时按需从系统字体里查找
+//! （Android 上没有 fontconfig，这条路径找不到东西，全靠下面的候选目录）。
 //! 这里再把思源黑体 / 苹方插到 `Proportional` 字体链最前面，让中英文正文
 //! 优先用它们；另外注册一个真正的粗体字族，供详情页车次号等少量文字使用。
 
@@ -92,7 +93,20 @@ fn font_dirs() -> Vec<PathBuf> {
         dirs.push(PathBuf::from("/Library/Fonts"));
     }
 
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(target_os = "android")]
+    {
+        // Android 没有 fontconfig，也没有 /usr/share/fonts；系统字体全在 /system/fonts。
+        // 中文是 NotoSansCJK-Regular.ttc（集合里选 NotoSansCJKsc-Regular），
+        // 少数精简系统只有 NotoSansCJKsc-Regular.otf，两个候选都命中同一套字形。
+        dirs.push(PathBuf::from("/system/fonts"));
+        dirs.push(PathBuf::from("/product/fonts"));
+    }
+
+    #[cfg(all(
+        not(target_os = "windows"),
+        not(target_os = "macos"),
+        not(target_os = "android")
+    ))]
     {
         for dir in [
             "/usr/share/fonts",
