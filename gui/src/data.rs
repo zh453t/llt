@@ -810,8 +810,9 @@ fn import_backup(source: &Path, target: &Path, backup_dir: &Path) -> anyhow::Res
     }
 
     if target.is_file() {
-        export_backup(target, backup_dir, state.data_version.as_deref())
-            .context("导入前备份当前库失败")?;
+        // 备份的是**当前**库，文件名里当然要写当前库的版本，不是要导入那份的。
+        let current = LocalState::read(target.to_path_buf()).data_version;
+        export_backup(target, backup_dir, current.as_deref()).context("导入前备份当前库失败")?;
     }
 
     let tmp = target.with_extension("sqlite.tmp");
