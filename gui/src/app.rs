@@ -1555,11 +1555,14 @@ impl LltApp {
             let advance = from.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
             // 交换放在两个框中间：箭头方向就是「对调」的意思。
-            // 「⇌」在 15 点字里偏小，单独放大到 22 点，按下时和两侧输入框等高。
+            // 字号按「字形行高 + 按钮内边距 ≤ 控件高度」反推，而不是写死 22 点：
+            // 写死时桌面（控件 30 点、按钮内边距 5+5）会被撑到 36 点，整行就对不齐。
+            let glyph = swap_glyph_size(ui, swap_width);
             let swap = ui
                 .add(
-                    egui::Button::new(RichText::new("⇌").size(22.0))
-                        .min_size(egui::vec2(swap_width, theme::control_height())),
+                    egui::Button::new(RichText::new("⇌").size(glyph))
+                        .min_size(egui::vec2(swap_width, swap_width))
+                        .wrap_mode(egui::TextWrapMode::Extend),
                 )
                 .on_hover_text("对调出发站与到达站");
             if swap.clicked() {
@@ -2817,6 +2820,23 @@ impl LltApp {
 
 // ---------------------------------------------------------------- 辅助函数
 
+/// 交换按钮里「⇌」的字号：按「字形行高 + 按钮内边距 ≤ 控件高度」反推。
+///
+/// 写死字号会出事：桌面控件高 30、按钮内边距 5+5，22 点字的行高约 27，
+/// 加起来 37 点，按钮比输入框高一截，整行就对不齐了。
+fn swap_glyph_size(ui: &Ui, button_size: f32) -> f32 {
+    let padding = 2.0 * ui.spacing().button_padding.y;
+    let row_height = |glyph: f32| {
+        ui.ctx()
+            .fonts_mut(|fonts| fonts.row_height(&egui::FontId::proportional(glyph)))
+    };
+    let mut glyph = (button_size * 0.7).round();
+    while glyph > 8.0 && row_height(glyph) + padding > button_size {
+        glyph -= 1.0;
+    }
+    glyph
+}
+
 /// 查询输入框。触摸屏上文字居中（水平和垂直），鼠标端保持默认的左对齐。
 fn query_input<'a>(text: &'a mut String, hint: &str, width: f32) -> egui::TextEdit<'a> {
     let edit = egui::TextEdit::singleline(text)
@@ -3936,6 +3956,42 @@ fn status_cell(ui: &mut Ui, running: bool) {
                 "当日不开行"
             })
     });
+}
+
+#[cfg(test)]
+mod swap_glyph_tests {
+    use super::*;
+
+    /// 「⇌」不能把交换按钮撑得比输入框高：两种指针各验一次。
+    ///
+    /// 这正是桌面端「输入框对不齐」的根因（写死 22 点字 + 按钮内边距 5+5 = 37 > 30）。
+    #[test]
+    fn swap_glyph_fits_the_button() {
+        for pointer in [theme::Pointer::Mouse, theme::Pointer::Touch] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx, pointer);
+            let mut measured = None;
+            let mut output = ctx.run_ui(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let size = theme::control_height();
+                    let glyph = swap_glyph_size(ui, size);
+                    let padding = 2.0 * ui.spacing().button_padding.y;
+                    let row = ui
+                        .ctx()
+                        .fonts_mut(|fonts| fonts.row_height(&egui::FontId::proportional(glyph)));
+                    measured = Some((glyph, row + padding, size));
+                });
+            });
+            // 字体纹理增量必须被消费掉，否则 epaint 的 TexturesDelta 在 drop 时 panic。
+            output.textures_delta.clear();
+            let (glyph, needed, size) = measured.expect("没画出界面");
+            assert!(
+                needed <= size,
+                "{pointer:?}: 字形 {glyph} 点需要 {needed} 点，超过控件高度 {size}"
+            );
+            assert!(glyph >= 12.0, "{pointer:?}: 字形太小（{glyph}）");
+        }
+    }
 }
 
 #[cfg(test)]
