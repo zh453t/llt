@@ -6,6 +6,7 @@
 //! **APK 不内置数据库**（数据包 41 MB，随包发会让 APK 翻倍，而且版本很快过时）：
 //! 第一次启动时库不存在，界面会落在「数据」页引导用户下载或导入备份。
 
+mod control;
 mod files;
 mod ime;
 
@@ -83,6 +84,7 @@ fn android_main(app: AndroidApp) {
             temp: cache_dir,
         },
         files: picker.map(|picker| picker as std::sync::Arc<dyn llt_gui::files::FilePicker>),
+        control: Some(control::attach(&app)),
     };
 
     if let Err(err) = llt_gui::run_with(options, db_path, config_path, platform) {
@@ -201,10 +203,15 @@ fn read_insets(app: &AndroidApp) -> Option<llt_gui::ScreenInsets> {
 /// 软键盘的高度（API 30+ 才有 `WindowInsets.Type.ime()`，低版本返回 0）。
 /// `WindowInsets.getInsets(WindowInsets.Type.systemBars())`，API 30+ 才有。
 /// 返回 `[top, left, right, bottom]`（像素）；老系统上返回 `None`。
-fn system_bar_insets_api30(env: &mut jni::JNIEnv<'_>, window_insets: &JObject<'_>) -> Option<[u32; 4]> {
+fn system_bar_insets_api30(
+    env: &mut jni::JNIEnv<'_>,
+    window_insets: &JObject<'_>,
+) -> Option<[u32; 4]> {
     let read = (|| -> jni::errors::Result<[jint; 4]> {
         let types = env.find_class("android/view/WindowInsets$Type")?;
-        let bars = env.call_static_method(types, "systemBars", "()I", &[])?.i()?;
+        let bars = env
+            .call_static_method(types, "systemBars", "()I", &[])?
+            .i()?;
         let insets = env
             .call_method(
                 window_insets,

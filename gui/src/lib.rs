@@ -114,6 +114,15 @@ pub trait ImeBridge: Send + Sync {
     fn attach_context(&self, ctx: &egui::Context);
 }
 
+/// 平台侧的应用级动作：返回键收完自己的页面之后，用它把控制权交回系统。
+///
+/// Android 上「返回」是 `activity.finish()`（左/右边缘滑动也是同一个返回事件）；
+/// 桌面没有这个入口（关窗由系统标题栏负责）。
+pub trait AppControl: Send + Sync {
+    /// 请求退出应用。
+    fn exit(&self);
+}
+
 /// 平台差异的唯一入口：界面只认这个结构体，不再各自传参。
 ///
 /// 桌面与 Android 的差别全在这里：系统栏缩进、系统输入法、指针类型、数据目录、
@@ -130,6 +139,8 @@ pub struct Platform {
     pub dirs: data::DataDirs,
     /// 系统文件选择器；桌面是 `None`（直接读写目录）。
     pub files: Option<Arc<dyn files::FilePicker>>,
+    /// 返回键 / 退出应用；桌面是 `None`。
+    pub control: Option<Arc<dyn AppControl>>,
 }
 
 impl Platform {
@@ -149,6 +160,7 @@ impl Platform {
             pointer,
             dirs: data::DataDirs::beside_exe(),
             files: None,
+            control: None,
         }
     }
 }

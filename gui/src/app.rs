@@ -188,6 +188,8 @@ pub struct LltApp {
     data: crate::data::DataPage,
     /// 上一帧「有没有输入框拿着键盘焦点」，只在变化时通知平台。
     ime_focus: bool,
+    /// 上一帧的可用尺寸（逻辑点），用来发现横竖屏/分屏变化。
+    last_screen: egui::Vec2,
     /// 点击输入框后还要补几次「弹键盘」：egui 每次点击都会 interrupt_ime，
     /// egui-winit 随之 set_ime_allowed(false)+(true)，Android 上先收后弹，
     /// 而「弹」会被系统忽略（焦点在我们的桥 View 上），所以要自己补一次。
@@ -275,6 +277,7 @@ impl LltApp {
             dirty_since: None,
             save_failed: false,
             ime_focus: false,
+            last_screen: egui::Vec2::ZERO,
             ime_reshow: 0,
         };
         // 打开就能打字：焦点落在恢复出来的那一页的输入框。
@@ -1138,13 +1141,13 @@ impl LltApp {
             {
                 clear = true;
             }
-            if !bar {
-                let fuzzy = ui
-                    .checkbox(&mut self.station_fuzzy, meta("模糊"))
-                    .on_hover_text("模糊搜索：按城市/同城组匹配，包含同城所有车站");
-                if fuzzy.changed() {
-                    changed = true;
-                }
+            // 「模糊」紧挨输入框右侧：它是「怎么匹配这个输入」的开关，跟输入放一起最直观；
+            // 触摸屏也从底栏挪到这儿（底栏只剩清空与计数）。
+            let fuzzy = ui
+                .checkbox(&mut self.station_fuzzy, meta("模糊"))
+                .on_hover_text("模糊搜索：按城市/同城组匹配，包含同城所有车站");
+            if fuzzy.changed() {
+                changed = true;
             }
             if let Some(title) = self.station_board_for.as_ref().filter(|_| !bar) {
                 let text = if self.station_options.len() > 1 {
@@ -1472,21 +1475,24 @@ impl LltApp {
 
     fn od_ui(&mut self, ui: &mut Ui) {
         let width = ui.available_width();
-        // 两个输入框 + 中间的交换按钮：按钮占一个控件的高度，两侧留一点间距。
+        // 一行里放：模糊（~46 点）+ 出发框 + ⇌ + 到达框。
+        // 站名最长 5 个汉字（5 × 15 点 = 75），所以输入框下限取 96 点，
+        // 再窄就会把「呼和浩特东」「八达岭西所」这类站名截掉。
         let swap_width = theme::control_height();
-        let field_width = ((width - swap_width - theme::GAP_S * 3.0) / 2.0).clamp(110.0, 200.0);
+        let fuzzy_width = 52.0;
+        let field_width =
+            ((width - fuzzy_width - swap_width - theme::GAP_S * 4.0) / 2.0).clamp(96.0, 200.0);
         let mut changed = false;
         // 触摸屏上「模糊 / 查询」在底栏（`od_bar`），这里只留两个输入框与交换按钮。
         let bar = self.bottom_bar();
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP_S;
-            if !bar {
-                let fuzzy = ui
-                    .checkbox(&mut self.od_fuzzy, meta("模糊"))
-                    .on_hover_text("模糊搜索：出发/到达按城市或同城组匹配所有车站");
-                if fuzzy.changed() {
-                    changed = true;
-                }
+            // 「模糊」在输入框左边：它是「怎么匹配输入」的开关，贴着输入放最直观。
+            let fuzzy = ui
+                .checkbox(&mut self.od_fuzzy, meta("模糊"))
+                .on_hover_text("模糊搜索：出发/到达按城市或同城组匹配所有车站");
+            if fuzzy.changed() {
+                changed = true;
             }
             // 两个框不再带标签：占位符已经说明了是出发站还是到达站，省下的宽度给输入。
             let from = ui.add(query_input(&mut self.od_from, "出发站", field_width));
@@ -2308,7 +2314,15 @@ impl LltApp {
 
 impl eframe::App for LltApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        // 横竖屏切换 / 分屏改尺寸时，系统不一定会再推一帧；尺寸一变就自己请求一次，
+        // 否则会看到旧宽度排出来的画面，得等下一次触摸才刷新。
+        let screen = ui.ctx().content_rect().size();
+        if self.last_screen != screen {
+            self.last_screen = screen;
+            ui.ctx().request_repaint();
+        }
         self.pump_ime(ui.ctx());
+        self.handle_back(ui.ctx());
         self.persist(ui.ctx());
         if !self.window_fitted {
             self.window_fitted = true;
@@ -2524,13 +2538,6 @@ impl LltApp {
     /// 站站的动作行：模糊 / 查询（「交换」在两个输入框中间，不在这里）。
     fn od_bar(&mut self, ui: &mut Ui) {
         let mut changed = false;
-        if ui
-            .checkbox(&mut self.od_fuzzy, meta("模糊"))
-            .on_hover_text("模糊搜索：出发/到达按城市或同城组匹配所有车站")
-            .changed()
-        {
-            changed = true;
-        }
         let can_query = !self.od_from.trim().is_empty() && !self.od_to.trim().is_empty();
         let (running, not_running) = self.running_split();
         let total = self.od_shown_count();
@@ -2577,7 +2584,6 @@ impl LltApp {
     /// 按车站的动作行：清空 / 模糊 + 计数。
     fn station_bar(&mut self, ui: &mut Ui) {
         let height = theme::control_height();
-        let mut changed = false;
         if !self.station_query.trim().is_empty()
             && ui
                 .add(egui::Button::new(meta("清空")).min_size(egui::vec2(0.0, height)))
@@ -2592,21 +2598,11 @@ impl LltApp {
             self.station_board.clear();
             self.focus_request = Some(FocusField::Station);
         }
-        if ui
-            .checkbox(&mut self.station_fuzzy, meta("模糊"))
-            .on_hover_text("模糊搜索：按城市/同城组匹配，包含同城所有车站")
-            .changed()
-        {
-            changed = true;
-        }
         let (running, not_running) = self.running_split();
         let total = self.station_board.len();
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             counts_label(ui, total, running, not_running);
         });
-        if changed {
-            self.refresh_station();
-        }
     }
 
     /// 当前列表里「当日开行 / 不开行」的条数（只统计已经在手上的结果）。
@@ -2659,6 +2655,23 @@ impl LltApp {
             .iter()
             .filter(|hit| self.od_filtered(hit))
             .count()
+    }
+
+    /// 系统「返回」（Android 的左/右边缘滑动、返回键都是它）。
+    ///
+    /// 顺序与常见手机应用一致：先关最上面那层自己开的页面（经由 → 车次详情），
+    /// 都没有时才把控制权交回系统退出应用。软键盘由系统自己先收，不会走到这里。
+    fn handle_back(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|input| input.key_pressed(egui::Key::BrowserBack)) {
+            return;
+        }
+        if self.via_page_open {
+            self.via_page_open = false;
+        } else if self.detail.is_some() {
+            self.close_detail();
+        } else if let Some(control) = &self.platform.control {
+            control.exit();
+        }
     }
 
     /// 「数据」页：当前库、检查更新、下载重建、备份导入导出。
