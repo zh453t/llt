@@ -138,7 +138,9 @@ pwsh -File android/build.ps1 -Release   # -> android/target/release/apk/llt-gui.
 Android 上没有「可执行文件旁」这个概念：数据库随 APK 下发，首次启动解到应用私有目录
 `/data/user/0/org.llt.timetable/files/`，配置文件 `llt-gui.json` 也在那里，
 `--db` / `--config` / `LLT_DB` / `LLT_CONFIG` 这些入口在 Android 上不参与。
-中文字体取自系统 `/system/fonts`；状态栏、导航栏与软键盘的位置由应用自己让开。
+中文字体取自系统 `/system/fonts`；系统里没有中文粗体，所以 APK 另带一份 Noto Sans SC
+Bold 的子集（919 KB，OFL-1.1），标题/表头/车次号的粗体才有字重。
+状态栏、导航栏与软键盘的位置由应用自己让开。
 系统输入法另有一条通道：`run_with` 的 `ime` 参数由平台侧实现 `ImeBridge`
 （桌面传 `None`，走 egui-winit），界面每帧把上屏 / 合成 / 删除事件转成 `egui::Event`
 推给输入框——Android 的 `NativeActivity` 没有 `InputConnection`，不接这一层中文进不来。
@@ -181,6 +183,9 @@ GUI 读 `trains`、`stops`、`stations` 三张主表；交路 / 车型 / 餐车 
 - 控件高度、列表行高、详情行高、可点文字热区、滚动条宽度都随 `theme::pointer()` 取值：
   鼠标 30 / 28 / 26，触摸屏 44 / 42 / 38。宽度阈值同样集中在 `theme`（`WIDE_MIN_WIDTH`、
   `STACKED_DETAIL_MAX_WIDTH` 及各表的列阈值），界面里不写字面量。
+- 第四个标签是**设置**：上半是查询开关（深浅色、站站/车站的模糊），下半是「数据」子章节
+  （当前库 / 更新 / 备份），整页共用一个滚动容器。深浅色存在配置的 `ui.theme`，重启后保留。
+- 字段类信息（数据版本、构建时间、大小、路径）用等宽字：数字对齐、路径好认。
 - 字号、行高、控件高度、间距和浅色/深色配色集中在 `src/theme.rs`：
   正文 15、辅助信息 13、标题 17/20、车次号 24，输入框与按钮统一 30 点高，
   表格表头 30 / 列表行 28、详情表头与行 26，所有区域共用同一套颜色与圆角。

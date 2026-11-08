@@ -10,6 +10,7 @@
 | # | 状态 | 现状字段 | 现状默认值 |
 |---|---|---|---|
 | 0 | 当前标签页 | `tab` | 站站（第一位） |
+| 0b | 深浅色 | `theme` | `system`（跟随系统，另有 `light` / `dark`） |
 | 1 | 站站「模糊」 | `od_fuzzy` | `false` |
 | 2 | 三种查询方式的查询词 | `train_query` / `station_query` / `od_from` + `od_to` | 空 |
 | 3 | 车次详情经由「只看车站」 | `via_stations_only` | `true` |

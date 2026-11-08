@@ -15,6 +15,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use eframe::egui;
 use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
 
@@ -59,6 +60,28 @@ pub struct Settings {
 pub struct UiSettings {
     /// 上次停留的标签页。
     pub tab: Tab,
+    /// 深浅色偏好（跟随系统 / 浅色 / 深色）。
+    pub theme: ThemeChoice,
+}
+
+/// 深浅色偏好。落盘用 `snake_case`：`system` / `light` / `dark`。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeChoice {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemeChoice {
+    pub fn preference(self) -> egui::ThemePreference {
+        match self {
+            Self::System => egui::ThemePreference::System,
+            Self::Light => egui::ThemePreference::Light,
+            Self::Dark => egui::ThemePreference::Dark,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,7 +265,10 @@ mod tests {
     fn sample() -> Settings {
         Settings {
             version: CONFIG_VERSION,
-            ui: UiSettings { tab: Tab::Station },
+            ui: UiSettings {
+                tab: Tab::Station,
+                theme: ThemeChoice::Dark,
+            },
             train: TrainSettings {
                 query: "G1".to_owned(),
                 date: Some(jiff::civil::date(2026, 11, 8)),

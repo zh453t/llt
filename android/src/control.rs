@@ -26,17 +26,21 @@ struct Control {
 
 impl AppControl for Control {
     fn exit(&self) {
-        if let Err(err) = finish(&self.app) {
+        if let Err(err) = move_to_back(&self.app) {
             eprintln!("退出应用失败：{err}");
         }
     }
 }
 
-fn finish(app: &AndroidApp) -> jni::errors::Result<()> {
+/// 把任务收到后台（`MainActivity.moveToBack()` → `moveTaskToBack(true)`）。
+///
+/// 不用 `activity.finish()`：那会销毁 Activity 但进程还在，而 winit 的事件循环
+/// 一个进程只能建一次，再进 `android_main` 接不上新窗口，界面就是黑的。
+fn move_to_back(app: &AndroidApp) -> jni::errors::Result<()> {
     // SAFETY: `android_main` 期间这两个指针由 android-activity 保证有效。
     let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) }?;
     let mut env = vm.attach_current_thread()?;
     let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
-    env.call_method(&activity, "finish", "()V", &[])?;
+    env.call_method(&activity, "moveToBack", "()V", &[])?;
     Ok(())
 }

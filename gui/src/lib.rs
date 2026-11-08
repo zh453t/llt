@@ -141,6 +141,8 @@ pub struct Platform {
     pub files: Option<Arc<dyn files::FilePicker>>,
     /// 返回键 / 退出应用；桌面是 `None`。
     pub control: Option<Arc<dyn AppControl>>,
+    /// 额外字体目录（Android 把内置的中文粗体解到应用目录，放这里；桌面为空）。
+    pub font_dirs: Vec<PathBuf>,
 }
 
 impl Platform {
@@ -161,6 +163,7 @@ impl Platform {
             dirs: data::DataDirs::beside_exe(),
             files: None,
             control: None,
+            font_dirs: Vec::new(),
         }
     }
 }

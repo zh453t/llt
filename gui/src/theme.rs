@@ -83,6 +83,15 @@ pub fn control_height() -> f32 {
     }
 }
 
+/// 等宽字：数据版本、时间戳、文件大小、路径、文件名这类需要对整齐的内容用它。
+///
+/// 中文字符仍然落到 CJK 字体（Hack 没有汉字），但数字、日期、路径本身会对齐。
+pub fn mono(text: impl Into<String>) -> egui::RichText {
+    egui::RichText::new(text.into())
+        .size(FONT_MONO)
+        .family(egui::FontFamily::Monospace)
+}
+
 /// 底栏按钮高度：比普通控件再高一点，拇指更容易点中（桌面跟控件同高）。
 pub fn bar_height() -> f32 {
     match pointer() {

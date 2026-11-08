@@ -27,6 +27,9 @@ const REGULAR_CANDIDATES: &[(&str, Option<&str>)] = &[
 ///
 /// 苹方没有 Bold，Semibold 是它最粗的一档。
 const BOLD_CANDIDATES: &[(&str, Option<&str>)] = &[
+    // Android 随 APK 带一份思源黑体 Bold 的子集（系统里只有 Regular），
+    // 由平台解到应用目录，见 `Platform::font_dirs`。
+    ("llt-bold.otf", None),
     ("SourceHanSansCN-Bold.otf", None),
     ("SourceHanSansSC-Bold.otf", None),
     ("SourceHanSansCN-Heavy.otf", None),
@@ -46,12 +49,12 @@ pub fn bold_family() -> FontFamily {
 
 /// 正文中文交给 eframe 的 `system_fonts` 按需回退；
 /// 这里把思源黑体 / 苹方插到正文字体链最前，并额外注册一个真正的粗体字族。
-pub fn install(ctx: &egui::Context) {
+pub fn install(ctx: &egui::Context, extra_dirs: &[PathBuf]) {
     let mut fonts = egui::FontDefinitions::default();
 
     // 正文族：思源黑体 / 苹方优先，其余（Ubuntu-Light、egui-icons）沿用默认链。
     // Monospace 保持 egui 默认的 Hack：时刻、里程等列要等宽对齐。
-    if let Some((name, data)) = load_first(REGULAR_CANDIDATES) {
+    if let Some((name, data)) = load_first(REGULAR_CANDIDATES, extra_dirs) {
         fonts.font_data.insert(name.clone(), Arc::new(data));
         fonts
             .families
@@ -62,14 +65,25 @@ pub fn install(ctx: &egui::Context) {
 
     // 粗体族：粗体字体优先，其余沿用正文字体链；找不到粗体时退化为普通字体。
     let mut bold_chain = Vec::new();
-    if let Some((name, data)) = load_first(BOLD_CANDIDATES) {
+    if let Some((name, data)) = load_first(BOLD_CANDIDATES, extra_dirs) {
         fonts.font_data.insert(name.clone(), Arc::new(data));
         bold_chain.push(name);
     }
     if let Some(proportional) = fonts.families.get(&FontFamily::Proportional) {
         bold_chain.extend(proportional.iter().cloned());
     }
-    fonts.families.insert(bold_family(), bold_chain);
+    fonts.families.insert(bold_family(), bold_chain.clone());
+
+    // 等宽族也要能显示汉字：egui 默认的 Monospace 只有 Hack（纯 ASCII），
+    // 数据版本、路径这类等宽文字里的中文会变成豆腐块。把中文字体追加到它后面，
+    // ASCII 仍然走 Hack（等宽对齐），汉字回退到中文字体。
+    if let Some(mono) = fonts.families.get_mut(&FontFamily::Monospace) {
+        for name in &bold_chain {
+            if !mono.contains(name) {
+                mono.push(name.clone());
+            }
+        }
+    }
 
     ctx.set_fonts(fonts);
 }
@@ -128,8 +142,13 @@ fn font_dirs() -> Vec<PathBuf> {
 }
 
 /// 按优先级找第一个可用候选，返回 (字体名, 字体数据)。
-fn load_first(candidates: &[(&str, Option<&str>)]) -> Option<(String, FontData)> {
-    let dirs = font_dirs();
+fn load_first(
+    candidates: &[(&str, Option<&str>)],
+    extra_dirs: &[PathBuf],
+) -> Option<(String, FontData)> {
+    // 平台给的目录排在最前面：Android 随 APK 带的那份粗体优先级最高。
+    let mut dirs: Vec<PathBuf> = extra_dirs.to_vec();
+    dirs.extend(font_dirs());
     for (file, wanted_face) in candidates {
         for dir in &dirs {
             let Ok(bytes) = std::fs::read(dir.join(file)) else {

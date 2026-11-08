@@ -221,10 +221,22 @@ impl DataPage {
     }
 
     /// 画这一页。返回是否需要重开数据库。
+    /// 独立成页时用（首次启动没有库、落在「数据」页）：自带滚动容器。
     pub fn ui(&mut self, ui: &mut Ui, db_path: &Path) -> DataOutcome {
         let mut outcome = DataOutcome::default();
-        self.pump_picker(ui.ctx(), db_path, &mut outcome);
-        self.poll_task(db_path, &mut outcome);
+        egui::ScrollArea::vertical()
+            .id_salt("data_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                self.contents(ui, db_path, &mut outcome);
+            });
+        outcome
+    }
+
+    /// 数据小节的内容本体（不建滚动容器）：设置页会把几段放进同一个滚动区。
+    pub fn contents(&mut self, ui: &mut Ui, db_path: &Path, outcome: &mut DataOutcome) {
+        self.pump_picker(ui.ctx(), db_path, outcome);
+        self.poll_task(db_path, outcome);
         if self
             .scanned_at
             .is_none_or(|at| at.elapsed() >= SCAN_INTERVAL)
@@ -232,23 +244,17 @@ impl DataPage {
             self.scan_backups();
         }
 
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                self.current_ui(ui, db_path);
-                ui.add_space(theme::GAP_M);
-                self.task_ui(ui, db_path);
-                ui.add_space(theme::GAP_M);
-                self.backup_ui(ui, db_path, &mut outcome);
-                if !self.backups.is_empty() {
-                    ui.add_space(theme::GAP_M);
-                    self.backup_list_ui(ui, db_path, &mut outcome);
-                }
-                ui.add_space(theme::GAP_M);
-                self.notes_ui(ui);
-            });
-
-        outcome
+        self.current_ui(ui, db_path);
+        ui.add_space(theme::GAP_M);
+        self.task_ui(ui, db_path);
+        ui.add_space(theme::GAP_M);
+        self.backup_ui(ui, db_path, outcome);
+        if !self.backups.is_empty() {
+            ui.add_space(theme::GAP_M);
+            self.backup_list_ui(ui, db_path, outcome);
+        }
+        ui.add_space(theme::GAP_M);
+        self.notes_ui(ui);
     }
 
     // ------------------------------------------------------------ 分区
@@ -259,11 +265,11 @@ impl DataPage {
             Some(state) if state.usable() => {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = theme::GAP_S;
-                    ui.label(body(format!(
+                    ui.label(theme::mono(format!(
                         "数据 {}",
                         state.data_version.as_deref().unwrap_or("未知")
                     )));
-                    ui.label(meta(format!(
+                    ui.label(theme::mono(format!(
                         "· 结构 v{}",
                         state
                             .schema_version
@@ -271,16 +277,22 @@ impl DataPage {
                             .unwrap_or_else(|| "?".to_owned())
                     )));
                 });
-                ui.label(meta(format!(
+                ui.label(theme::mono(format!(
                     "构建于 {}",
                     state.built_at.as_deref().unwrap_or("未知")
                 )));
                 let bytes = file_size(db_path);
-                ui.label(meta(format!(
-                    "{} · {}",
-                    size_text(bytes),
-                    db_path.display()
-                )));
+                // 大小、位置各占一行并带标签：路径很长，混在一行里读起来费劲。
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = theme::GAP_S;
+                    ui.label(meta("大小").weak());
+                    ui.label(theme::mono(size_text(bytes)));
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = theme::GAP_S;
+                    ui.label(meta("位置").weak());
+                    ui.label(theme::mono(db_path.display().to_string()));
+                });
             }
             Some(state) => {
                 ui.label(body("数据不完整：").color(ui.visuals().error_fg_color));
@@ -289,7 +301,7 @@ impl DataPage {
                 }
             }
             None => {
-                ui.label(body(format!("还没有数据（{}）", db_path.display())));
+                ui.label(theme::mono(format!("还没有数据（{}）", db_path.display())));
                 ui.label(meta("下载一份，或从备份里导入。"));
                 if self.picker.is_none() {
                     // 桌面（绿色版）才有命令行入口，Android 上没有 argv。
@@ -386,10 +398,11 @@ impl DataPage {
                 self.pick_backup(ui.ctx());
             }
         });
-        if self.picker.is_some() {
-            ui.label(meta("导入会弹系统文件选择器；导出由你决定存到哪。"));
-        } else {
-            ui.label(meta(format!("导入目录：{}", self.dirs.import.display())));
+        if self.picker.is_none() {
+            ui.label(theme::mono(format!(
+                "导入目录：{}",
+                self.dirs.import.display()
+            )));
         }
 
         if let Some(path) = self.pending_import.clone() {
@@ -426,7 +439,7 @@ impl DataPage {
                     .as_deref()
                     .map(|version| format!("数据 {version}"))
                     .unwrap_or_else(|| "版本未知".to_owned());
-                ui.label(body(format!(
+                ui.label(theme::mono(format!(
                     "{} · {} · {version}",
                     file_name(&entry.path),
                     size_text(entry.bytes)
@@ -448,26 +461,13 @@ impl DataPage {
     fn notes_ui(&mut self, ui: &mut Ui) {
         heading(ui, "说明");
         match self.picker {
-            // 有系统选择器：存哪儿由用户决定，说清楚流程就行。
-            Some(_) => {
-                ui.label(meta(
-                    "导出会弹系统的「保存到」，自己选存哪（下载、网盘、U 盘都行）。",
-                ));
-                ui.label(meta(
-                    "导入会弹文件选择器；导入前会把当前库另存一份到应用目录。",
-                ));
-            }
-            // 桌面：备份都在可执行文件旁。
-            None => {
-                ui.label(meta(format!(
-                    "导出的备份写在 {}；把它拷回这里就能导入。",
-                    self.dirs.export.display()
-                )));
-            }
-        }
-        ui.label(meta(
-            "下载会占用约 90 MB 临时空间（2.3 MB 数据包 + 解包 + 42 MB 新库）。",
-        ));
+            Some(_) => ui.label(meta("导出走系统「保存到」，导入前会自动备份当前库。")),
+            None => ui.label(meta(format!(
+                "备份写在 {}，拷回这里即可导入。",
+                self.dirs.export.display()
+            ))),
+        };
+        ui.label(meta("更新需要约 90 MB 临时空间。"));
     }
 
     // ------------------------------------------------------------ 动作
@@ -876,7 +876,8 @@ fn body(text: impl Into<String>) -> RichText {
 }
 
 fn meta(text: impl Into<String>) -> RichText {
-    RichText::new(text.into()).size(theme::FONT_META)
+    // 设置页的小字用 14 点（FONT_HINT）：13 点在这个页面里偏碎。
+    RichText::new(text.into()).size(theme::FONT_HINT)
 }
 
 fn button(ui: &mut Ui, text: &str) -> egui::Response {

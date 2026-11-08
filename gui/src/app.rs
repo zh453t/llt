@@ -166,6 +166,8 @@ pub struct LltApp {
     data_version: Option<i64>,
 
     tab: Tab,
+    /// 深浅色偏好（`ThemeChoice`），改了就落盘。
+    theme: config::ThemeChoice,
     /// 三个查询页各自的查询日期（互不影响，各自落盘）。
     dates: Dates,
 
@@ -252,7 +254,7 @@ impl LltApp {
         config_path: PathBuf,
         platform: crate::Platform,
     ) -> Self {
-        fonts::install(&cc.egui_ctx);
+        fonts::install(&cc.egui_ctx, &platform.font_dirs);
         theme::install(&cc.egui_ctx, platform.pointer);
         // 输入法上屏发生在别的线程：先把界面句柄交给它，它才催得动帧。
         if let Some(ime) = &platform.ime {
@@ -261,6 +263,8 @@ impl LltApp {
 
         // 配置读取失败只降级，不阻断启动：返回默认值 + 一句提示。
         let (settings, config_warning) = config::load(&config_path);
+        // 上次选的深浅色（默认跟随系统）。
+        cc.egui_ctx.set_theme(settings.ui.theme.preference());
         let data_page = crate::data::DataPage::new(platform.dirs.clone(), platform.files.clone());
         let mut app = Self {
             db: None,
@@ -270,6 +274,7 @@ impl LltApp {
             data_version: None,
             // 上次停留的标签页；第一次启动是第一位（站站）。
             tab: settings.ui.tab,
+            theme: settings.ui.theme,
             dates: Dates {
                 od: settings.od.date.unwrap_or_else(today),
                 train: settings.train.date.unwrap_or_else(today),
@@ -436,7 +441,10 @@ impl LltApp {
     fn settings(&self) -> config::Settings {
         config::Settings {
             version: config::CONFIG_VERSION,
-            ui: config::UiSettings { tab: self.tab },
+            ui: config::UiSettings {
+                tab: self.tab,
+                theme: self.theme,
+            },
             train: config::TrainSettings {
                 query: self.train_query.clone(),
                 date: Some(self.dates.train),
@@ -806,7 +814,7 @@ impl LltApp {
                 && let Some(version) = self.data_version
             {
                 ui.add_space(theme::GAP_XS);
-                ui.label(meta(format!("数据 {}", date_ymd(version))).weak())
+                ui.label(theme::mono(format!("数据 {}", date_ymd(version))).weak())
                     .on_hover_text(format!("数据包版本 {version}（库内 meta.data_version）"));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -896,15 +904,21 @@ impl LltApp {
     }
 
     /// 浅色 / 深色切换。
+    /// 切换深浅色并记住选择（头部按钮与设置页共用同一个入口）。
+    fn set_theme(&mut self, ctx: &egui::Context, choice: config::ThemeChoice) {
+        self.theme = choice;
+        ctx.set_theme(choice.preference());
+    }
+
     fn theme_button(&mut self, ui: &mut Ui) {
         let dark = ui.visuals().dark_mode;
-        let (label, next_theme) = if dark {
-            ("浅色", egui::Theme::Light)
+        let (label, next) = if dark {
+            ("浅色", config::ThemeChoice::Light)
         } else {
-            ("深色", egui::Theme::Dark)
+            ("深色", config::ThemeChoice::Dark)
         };
         if ui.add(egui::Button::new(meta(label))).clicked() {
-            ui.ctx().set_theme(next_theme);
+            self.set_theme(ui.ctx(), next);
         }
     }
 
@@ -1136,11 +1150,8 @@ impl LltApp {
             let rest = ui.available_width();
             let reserve = 52.0 + 112.0 + theme::GAP_S * 2.0;
             let field_width = (rest - reserve).clamp(90.0, 240.0);
-            let response = ui.add(query_input(
-                &mut self.station_query,
-                "例如 北京 / 北京南",
-                field_width,
-            ));
+            // 车站输入框不放占位符：候选站就在下面，写例子只是多一层噪音。
+            let response = ui.add(query_input(&mut self.station_query, "", field_width));
             self.take_focus(ui, FocusField::Station, &response);
             if response.changed() {
                 changed = true;
@@ -2542,8 +2553,10 @@ impl LltApp {
                             ui.separator();
                             ui.horizontal(|ui| {
                                 if let Some(version) = self.data_version {
-                                    ui.label(meta(format!("数据 {}", date_ymd(version))).weak())
-                                        .on_hover_text("数据包版本（库内 meta.data_version）");
+                                    ui.label(
+                                        theme::mono(format!("数据 {}", date_ymd(version))).weak(),
+                                    )
+                                    .on_hover_text("数据包版本（库内 meta.data_version）");
                                 }
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                     self.theme_button(ui);
@@ -2788,16 +2801,24 @@ impl LltApp {
 
     /// 「设置」页：三个查询页的开关 + 数据（子章节）。
     fn settings_ui(&mut self, ui: &mut Ui) {
+        let mut outcome = crate::data::DataOutcome::default();
         egui::ScrollArea::vertical()
             .id_salt("settings_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                // 设置页条目多，纵向间距比别处再紧一档（8 → 4）。
+                ui.spacing_mut().item_spacing.y = theme::GAP_XS;
                 self.query_settings_ui(ui);
-                ui.add_space(theme::GAP_M);
+                ui.add_space(theme::GAP_XS);
                 ui.separator();
-                ui.add_space(theme::GAP_M);
-                self.data_ui(ui);
+                ui.add_space(theme::GAP_XS);
+                // 数据是设置的一个子章节：复用它的内容，但滚动容器由本页统一提供。
+                self.data.contents(ui, &self.db_path, &mut outcome);
             });
+        if outcome.reload_db {
+            self.open_db();
+            self.data.refresh(&self.db_path);
+        }
     }
 
     /// 「查询」小节：三个查询页各自的模糊开关（车次页没有模糊）。
@@ -2808,13 +2829,30 @@ impl LltApp {
                 .family(fonts::bold_family()),
         );
         ui.add_space(theme::GAP_XS);
-        ui.checkbox(&mut self.od_fuzzy, meta("站站：模糊匹配同城车站"))
-            .on_hover_text("出发/到达按城市或同城组匹配所有车站");
-        ui.checkbox(&mut self.station_fuzzy, meta("车站：模糊匹配同城车站"))
-            .on_hover_text("站名按城市/同城组匹配，包含同城所有车站");
-        ui.label(meta("车次页没有模糊开关：车次号本身就是精确的前缀匹配。").weak());
+        ui.horizontal(|ui| {
+            ui.label(setting_label("深浅色"));
+            ui.add_space(theme::GAP_XS);
+            for (choice, label) in [
+                (config::ThemeChoice::System, "跟随系统"),
+                (config::ThemeChoice::Light, "浅色"),
+                (config::ThemeChoice::Dark, "深色"),
+            ] {
+                if ui
+                    .selectable_label(self.theme == choice, setting_label(label))
+                    .clicked()
+                {
+                    self.set_theme(ui.ctx(), choice);
+                }
+            }
+        });
         ui.add_space(theme::GAP_XS);
-        ui.label(meta("查询日期分别在三个查询页里设置，各存一份。").weak());
+        ui.checkbox(&mut self.od_fuzzy, setting_label("站站：模糊匹配同城车站"))
+            .on_hover_text("出发/到达按城市或同城组匹配所有车站");
+        ui.checkbox(
+            &mut self.station_fuzzy,
+            setting_label("车站：模糊匹配同城车站"),
+        )
+        .on_hover_text("站名按城市/同城组匹配，包含同城所有车站");
     }
 
     /// 「数据」页：当前库、检查更新、下载重建、备份导入导出。
@@ -3016,6 +3054,11 @@ fn enter_key() -> egui::Event {
 
 fn meta(text: impl Into<String>) -> RichText {
     RichText::new(text).size(theme::FONT_META)
+}
+
+/// 设置页里的选项文字：用正文号，比弱化小字好读。
+fn setting_label(text: impl Into<String>) -> RichText {
+    RichText::new(text).size(theme::FONT_BODY)
 }
 
 /// 真粗体：`RichText::strong()` 只改颜色，真正加粗要指定字体族。

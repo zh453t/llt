@@ -83,8 +83,21 @@ UI 遮住的屏幕区域」，只包含状态栏/导航栏/刘海；我们这里
 ### 2.4 中文字体
 
 Android 没有 fontconfig，系统字体都在 `/system/fonts`（中文是 `NotoSansCJK-Regular.ttc`）。
-`gui/src/fonts.rs` 的候选目录里补了 `/system/fonts` 与 `/product/fonts`；真实粗体在多数
-ROM 上找不到独立字形文件，会退化成普通字重而不是豆腐块。
+`gui/src/fonts.rs` 的候选目录里补了 `/system/fonts` 与 `/product/fonts`。
+
+**粗体随 APK 带一份**：系统里只有 `NotoSansCJK-Regular.ttc`，没有粗体字形，标题、
+表头、车次号这些本该加粗的地方在 Android 上会退化成普通字重（`RichText::strong()` 只改
+颜色，而我们把 `override_text_color` 设成了正文色，连颜色也看不出来）。
+
+做法：用 Noto Sans SC Bold（OFL-1.1）按「数据库里的全部汉字 + 源码里的界面文案 +
+GB2312 一级字库」做子集，得到 **919 KB** 的 `llt-bold.otf`，放在
+`android/app/src/main/assets/fonts/`；启动时解到 `files/fonts/`（大小不一致才重写），
+路径通过 `Platform::font_dirs` 交给 `fonts::install`，候选表里排在第一位。
+许可证随包放在同一个目录的 `OFL.txt`。
+
+> 等宽族也补了中文回退：egui 默认的 `Monospace` 只有 Hack（纯 ASCII），
+> 「数据 / 路径」这类等宽文字里的汉字会变豆腐块，所以把中文（含粗体）追加到
+> `Monospace` 链尾部——ASCII 仍走 Hack 等宽对齐，汉字回退到中文字体。
 
 ### 2.5 中文输入法
 
@@ -275,7 +288,9 @@ adb shell screencap -p /sdcard/s.png   # 无窗口也能截屏
   普通行一致：上 51、下 46 px）。
 - 车次详情是**整页**（列表被替换），整页只有一个滚动块：
   经由（窄条）→ 时刻表 → 杂项，标题栏固定在上面；经由页是整页模态。
-- 「数据」页是第四个标签页，桌面也有（同一份代码，桌面只是没有 SAF）。
+- 「设置」页是第四个标签页（原「数据」页）：上面是查询开关（深浅色 / 两个模糊），
+  下面是「数据」子章节；整页一个滚动容器，小字 14 点。
+- 深浅色（跟随系统 / 浅色 / 深色）存在配置的 `ui.theme` 里，头部按钮与设置页共用同一入口。
 - 标签页名称：站站 / 车次 / 车站 / 数据（桌面同一套）。
 
 ## 7 验证记录
@@ -302,11 +317,15 @@ adb shell screencap -p /sdcard/s.png   # 无窗口也能截屏
 
 1. **只验过一台真机**（vivo / Android 17）。其它 ROM 的字体、刘海、手势导航
    `getRootWindowInsets()` 返回值，以及明文 HTTP 是否被运营商劫持，仍需实测。
-2. **横屏左栏会滚动**：控件多的页面（站站的「出发/到达」筛选）在 393 点高的横屏里
+2. **返回是「收到后台」而不是退出进程**：`activity.finish()` 会销毁 Activity 但进程还活着，
+   而 winit 的事件循环一个进程只能建一次，再从桌面进来接不上新窗口，界面就是黑的（实测）。
+   现在调 `moveTaskToBack(true)`：看起来退出、事件循环保留；系统真把进程杀了，下次启动
+   会走完整的 `onCreate` → `android_main`。
+3. **横屏左栏会滚动**：控件多的页面（站站的「出发/到达」筛选）在 393 点高的横屏里
    放不进一屏，需要滑一下左栏；没有再把筛选压成一行（会挤掉输入框的宽度）。
-3. **剪贴板**：Android 侧没有开 eframe 的 `clipboard`（arboard 无 Android 后端），
+4. **剪贴板**：Android 侧没有开 eframe 的 `clipboard`（arboard 无 Android 后端），
    输入框里不能长按粘贴。
-4. **键盘盖住底栏**：为了让布局不跳动，键盘是「浮层」而不是挤压布局，打字时看不到
+5. **键盘盖住底栏**：为了让布局不跳动，键盘是「浮层」而不是挤压布局，打字时看不到
    底栏（三个查询页都边打边查，点结果区收键盘即可）。
 4. **粗体是「假」粗体**（见 §2.4）。要真粗体得往 assets 塞一份思源黑体 Bold 子集。
 5. **备份校验只到结构层**：查 `application_id`、结构版本、必需表；不做内容哈希。

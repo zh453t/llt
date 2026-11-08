@@ -72,6 +72,18 @@ public final class MainActivity extends NativeActivity {
         });
     }
 
+    /**
+     * 「返回」的最后一步：把任务收到后台，而不是 {@code finish()}。
+     *
+     * <p>{@code finish()} 会销毁 Activity，而进程还活着；再次启动时 winit 的事件循环
+     * 已经在同一个进程里建过了，{@code android_main} 再跑一遍也接不上新窗口，
+     * 结果就是一片黑（实测）。收到后台既保留了「看起来退出了」的效果，又保住了
+     * 事件循环；系统真把它杀了，下次启动会走完整的 {@code onCreate} → {@code android_main}。
+     */
+    public void moveToBack() {
+        runOnUiThread(() -> moveTaskToBack(true));
+    }
+
     /** 弹系统「保存到」选择器，把当前库另存一份。 */
     public void requestExportBackup(final String sourcePath, final String suggestedName) {
         runOnUiThread(() -> {

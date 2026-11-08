@@ -10,7 +10,11 @@ mod control;
 mod files;
 mod ime;
 
-use std::path::PathBuf;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use android_activity::ndk::asset::Asset;
 
 use android_activity::AndroidApp;
 use jni::objects::JObject;
@@ -22,6 +26,11 @@ use jni::sys::jint;
 /// 代价是键盘会盖住底栏，要按 查询/切页 得先收键盘。
 /// `true`：把键盘高度算进底部缩进，整个界面收缩到键盘上方（键盘一弹一收，列表位置会跳）。
 const SHRINK_FOR_IME: bool = false;
+
+/// 随 APK 带的中文粗体子集：系统 /system/fonts 里只有 NotoSansCJK-Regular，
+/// 没有粗体字形，界面里所有「粗体」都会退化成普通字重。
+const FONT_ASSET: &str = "fonts/llt-bold.otf";
+const FONT_FILE: &str = "llt-bold.otf";
 
 /// 私有目录里的文件名。
 const DB_FILE: &str = "llt-timetable.sqlite";
@@ -44,6 +53,14 @@ fn android_main(app: AndroidApp) {
     // - 库和配置在私有目录（filesDir），不需要任何权限；
     // - 备份的导入/导出走系统文件选择器，Java 侧临时拷到 filesDir/import；
     // - 临时目录用 cacheDir（Android 没有可写的 /tmp）。
+    // 内置粗体解到 files/fonts/，界面的字体链把它排在最前面。
+    let font_dir = match install_font(&app, &files_dir) {
+        Ok(dir) => Some(dir),
+        Err(err) => {
+            eprintln!("解出内置粗体失败（只能用系统字体）：{err}");
+            None
+        }
+    };
     let cache_dir = cache_dir(&app).unwrap_or_else(|| files_dir.join("cache"));
     let import_dir = files_dir.join("import");
     let _ = std::fs::create_dir_all(&import_dir);
@@ -85,11 +102,46 @@ fn android_main(app: AndroidApp) {
         },
         files: picker.map(|picker| picker as std::sync::Arc<dyn llt_gui::files::FilePicker>),
         control: Some(control::attach(&app)),
+        font_dirs: font_dir.into_iter().collect(),
     };
 
     if let Err(err) = llt_gui::run_with(options, db_path, config_path, platform) {
         eprintln!("界面启动失败：{err}");
     }
+}
+
+/// 把 APK 里的粗体子集解到 `files/fonts/`（大小不一致时才重写）。
+fn install_font(app: &AndroidApp, dir: &Path) -> io::Result<PathBuf> {
+    let target_dir = dir.join("fonts");
+    let target = target_dir.join(FONT_FILE);
+    let mut asset = open_asset(app, FONT_ASSET)?;
+    let wanted = asset.length() as u64;
+    if fs::metadata(&target).map(|meta| meta.len()).ok() == Some(wanted) {
+        return Ok(target_dir);
+    }
+
+    fs::create_dir_all(&target_dir)?;
+    let tmp = target.with_extension("otf.tmp");
+    let copied = (|| -> io::Result<()> {
+        let mut out = fs::File::create(&tmp)?;
+        io::copy(&mut asset, &mut out)?;
+        out.sync_all()
+    })();
+    if let Err(err) = copied {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
+    fs::rename(&tmp, &target)?;
+    Ok(target_dir)
+}
+
+/// 打开 APK 里的一个资源文件。
+fn open_asset(app: &AndroidApp, name: &str) -> io::Result<Asset> {
+    let c_name = std::ffi::CString::new(name)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, name.to_owned()))?;
+    app.asset_manager().open(&c_name).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, format!("APK 里没有 {name}"))
+    })
 }
 
 /// 应用 cache 目录（与 files 同级）。
