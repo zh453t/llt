@@ -77,6 +77,14 @@ ROM 上找不到独立字形文件，会退化成普通字重而不是豆腐块�
 经 JNI 交给 Rust，再由界面转成 `egui::Event::Ime`。详见 `android/src/ime.rs` 与
 `android/app/src/main/java/org/llt/timetable/ImeBridge.java`。
 
+**为什么点输入框会把键盘弹掉**（已修）：egui 每次点击输入框都会
+`Memory::request_focus` → `interrupt_ime`，egui-winit 于是在帧末
+`set_ime_allowed(false)` + `(true)`——在 Android 上就是 `hide_soft_input` 收键盘，
+而「再弹」走 `showSoftInput(DecorView)`，因为焦点在我们的桥 View 上被系统忽略。
+所以点击之后不能立刻 show（那一帧结束时就被收掉了），而是标记「补弹两次」，
+40 ms 后重新请求一帧再 `showSoftInput`；并且**不要** `restartInput`
+（它会让键盘闪一下）。
+
 ### 2.6 文件选择器（SAF）
 
 `ACTION_OPEN_DOCUMENT` / `ACTION_CREATE_DOCUMENT` 的结果只在
@@ -171,8 +179,9 @@ adb shell screencap -p /sdcard/s.png   # 无窗口也能截屏
 
 ## 6 界面上的 Android 差异
 
-- 控件高度 44、列表行 42、详情行 38、滚动条 14（`theme::Pointer::Touch`），
-  关掉 `selectable_labels` 让整行可点。
+- 控件高度 44、顶栏 36、列表行 38（表头 32）、详情行 34（表头 30）、滚动条 14
+  （`theme::Pointer::Touch`），关掉 `selectable_labels` 让整行可点。
+- 输入框里的文字水平、垂直居中（`TextEdit::align(CENTER_CENTER)`），只在触摸屏启用。
 - **底栏**（`body()` 里的 `tab_bar_bottom` + `action_bar`）：标签页四等分放最底下，
   上面一行是当前页的动作与计数。凡是「不是输入框、又占表格上方」的控件都收进来了：
   站站是 `模糊 / 查询 + 计数`，车次是 `清空 + 计数`，车站是 `清空 / 模糊 + 计数`。
@@ -181,7 +190,12 @@ adb shell screencap -p /sdcard/s.png   # 无窗口也能截屏
 - 头部只剩一行 `标题 + 日期 + 主题`（桌面仍是标题行 + 标签行 + 日期行）。
 - 筛选 chip（站站的车站筛选、车站的同城车站勾选）用 `theme::chip_height()`：触摸 30 点、
   桌面 22 点，一行能放更多个，也少占一行高。
-- 车次详情是**整页**（列表被替换），不是底部面板；经由页是整页模态。
+- 站站结果在竖屏用六列表：`状态 车次 出发站 出发时间 到达站 到达时间`。固定列宽、
+  允许横向溢出；表格放在**一个横竖都能滚**的 `ScrollArea::both` 里，
+  表格自身 `drag_to_scroll(Never)`——嵌套两个 ScrollArea 时内层会把手指拖动全吃掉，
+  结果横向只能拖滚动条（踩过的坑）。
+- 车次详情是**整页**（列表被替换），整页只有一个滚动块：
+  经由（窄条）→ 时刻表 → 杂项，标题栏固定在上面；经由页是整页模态。
 - 「数据」页是第四个标签页，桌面也有（同一份代码，桌面只是没有 SAF）。
 - 标签页名称：站站 / 车次 / 车站 / 数据（桌面同一套）。
 
