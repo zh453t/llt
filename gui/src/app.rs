@@ -2017,8 +2017,11 @@ impl LltApp {
                 &mut header,
             );
             ui.add_space(theme::GAP_S);
-            ui.separator();
-            ui.add_space(theme::GAP_S);
+            // 经由条自带一条顶线；这时再画分隔线就成了两条并排的重复线。
+            if !has_via {
+                ui.separator();
+                ui.add_space(theme::GAP_S);
+            }
             egui::ScrollArea::vertical()
                 .id_salt("detail_page_scroll")
                 .auto_shrink([false, false])
