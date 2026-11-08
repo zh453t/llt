@@ -97,6 +97,36 @@ public final class ImeBridge extends View {
     }
 
     /**
+     * 焦点没变、用户又点了一下输入框：只把键盘叫回来。
+     *
+     * <p>不能复用 {@link #setActive(boolean)}：那里有 {@code restartInput}，
+     * 键盘已经显示时重启输入会话会让它闪一下又收起。
+     */
+    public static void ensureActive() {
+        final ImeBridge bridge = sInstance;
+        if (bridge == null) {
+            return;
+        }
+        bridge.post(new Runnable() {
+            @Override
+            public void run() {
+                if (!bridge.hasFocus() && !bridge.requestFocus()) {
+                    return;
+                }
+                InputMethodManager imm =
+                        (InputMethodManager) bridge
+                                .getContext()
+                                .getSystemService(Context.INPUT_METHOD_SERVICE);
+                // 不能用 `imm.isActive()` 当开关：键盘已经收起时它仍可能是 true。
+                // `showSoftInput` 在对端已显示时是空操作，所以无条件调一次最稳。
+                if (imm != null) {
+                    imm.showSoftInput(bridge, 0);
+                }
+            }
+        });
+    }
+
+    /**
      * 输入法按这里填的 {@code inputType} 决定要不要做合成与候选。
      *
      * <p>留 `TYPE_NULL`（默认）时输入法会认定「对面只认按键」，中文输入直接被禁用，

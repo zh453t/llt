@@ -35,16 +35,16 @@ const CONTROL_HEIGHT_MOUSE: f32 = 30.0;
 const CONTROL_HEIGHT_TOUCH: f32 = 44.0;
 /// 鼠标下的结果列表行高。
 const LIST_ROW_HEIGHT_MOUSE: f32 = 28.0;
-const LIST_ROW_HEIGHT_TOUCH: f32 = 42.0;
+const LIST_ROW_HEIGHT_TOUCH: f32 = 38.0;
 /// 鼠标下的列表表头高度。
 const LIST_HEADER_HEIGHT_MOUSE: f32 = 30.0;
-const LIST_HEADER_HEIGHT_TOUCH: f32 = 38.0;
+const LIST_HEADER_HEIGHT_TOUCH: f32 = 32.0;
 /// 鼠标下的详情（停站表 / 经由表）行高。
 const DETAIL_ROW_HEIGHT_MOUSE: f32 = 26.0;
-const DETAIL_ROW_HEIGHT_TOUCH: f32 = 38.0;
+const DETAIL_ROW_HEIGHT_TOUCH: f32 = 34.0;
 /// 详情表格表头高度。
 const DETAIL_HEADER_HEIGHT_MOUSE: f32 = 26.0;
-const DETAIL_HEADER_HEIGHT_TOUCH: f32 = 34.0;
+const DETAIL_HEADER_HEIGHT_TOUCH: f32 = 30.0;
 
 // ---------------------------------------------------------------- 指针类型
 
@@ -65,6 +65,14 @@ static POINTER: std::sync::OnceLock<Pointer> = std::sync::OnceLock::new();
 /// 当前进程的指针类型；没调用过 [`install`]（例如单元测试）时按鼠标算。
 pub fn pointer() -> Pointer {
     POINTER.get().copied().unwrap_or_default()
+}
+
+/// 顶栏高度：手机上一行 `标题 + 日期 + 主题` 就够，不必跟控件一样高。
+pub fn header_height() -> f32 {
+    match pointer() {
+        Pointer::Mouse => CONTROL_HEIGHT_MOUSE,
+        Pointer::Touch => 36.0,
+    }
 }
 
 /// 输入框、按钮、日期选择器的统一高度。
@@ -157,6 +165,10 @@ pub const TRAIN_COLUMNS_MIN_WIDTH: f32 = 760.0;
 pub const STATION_COLUMNS_MIN_WIDTH: f32 = 880.0;
 /// 站站查询开始显示「里程 / 区段」列的宽度。
 pub const OD_COLUMNS_MIN_WIDTH: f32 = 840.0;
+
+/// 触摸屏上「状态 车次 出发站 出发时间 到达站 到达时间」这套六列表的最小宽度：
+/// 宽度不够时不再压缩列，而是允许横向溢出、用横向滚动看全。
+pub const OD_TOUCH_SCROLL_WIDTH: f32 = 640.0;
 
 /// 常用间距，全部取 4 的倍数。
 pub const GAP_XS: f32 = 4.0;

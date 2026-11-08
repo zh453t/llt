@@ -102,6 +102,10 @@ pub trait ImeBridge: Send + Sync {
     fn drain(&self) -> Vec<ImeInput>;
     /// 界面里是否有输入框拿着键盘焦点。Android 靠它把输入法连接重新挂稳。
     fn set_text_focus(&self, focused: bool);
+    /// 焦点没变、但用户又点了一下输入框：只把键盘叫回来，别重启输入会话。
+    ///
+    /// 直接再走一遍 [`Self::set_text_focus`] 会 `restartInput`，键盘会闪一下再收起。
+    fn ensure_shown(&self);
     /// 把界面句柄交给平台侧。
     ///
     /// 输入法上屏发生在系统自己的线程里，egui 并不知道有新输入；界面空闲时

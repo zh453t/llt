@@ -183,6 +183,10 @@ pub struct LltApp {
     data: crate::data::DataPage,
     /// 上一帧「有没有输入框拿着键盘焦点」，只在变化时通知平台。
     ime_focus: bool,
+    /// 点击输入框后还要补几次「弹键盘」：egui 每次点击都会 interrupt_ime，
+    /// egui-winit 随之 set_ime_allowed(false)+(true)，Android 上先收后弹，
+    /// 而「弹」会被系统忽略（焦点在我们的桥 View 上），所以要自己补一次。
+    ime_reshow: u8,
     /// 最近一次读到的缩进。
     safe_area: crate::ScreenInsets,
     /// 上一次询问缩进的时间，用作最小间隔。
@@ -266,6 +270,7 @@ impl LltApp {
             dirty_since: None,
             save_failed: false,
             ime_focus: false,
+            ime_reshow: 0,
         };
         // 打开就能打字：焦点落在恢复出来的那一页的输入框。
         app.focus_request = Some(app.focus_field(app.tab));
@@ -347,9 +352,21 @@ impl LltApp {
         let clicked = ctx.input(|input| input.pointer.any_click());
         if focused != self.ime_focus {
             self.ime_focus = focused;
+            self.ime_reshow = 0;
             ime.set_text_focus(focused);
         } else if focused && clicked {
-            ime.set_text_focus(true);
+            // 点输入框时 egui 会 request_focus → interrupt_ime，egui-winit 于是在
+            // 这一帧末尾 `set_ime_allowed(false)` + `(true)`：Android 上先收键盘，
+            // 而「再弹」因为焦点在我们的桥 View 上被系统忽略 —— 用户看到的就是
+            // 「点一下就收起来」。所以这一帧结束后补两次 show（跨过那次 hide）。
+            self.ime_reshow = 2;
+            ctx.request_repaint_after(std::time::Duration::from_millis(40));
+        } else if self.ime_reshow > 0 && focused {
+            self.ime_reshow -= 1;
+            ime.ensure_shown();
+            if self.ime_reshow > 0 {
+                ctx.request_repaint_after(std::time::Duration::from_millis(120));
+            }
         }
     }
 
@@ -725,6 +742,10 @@ impl LltApp {
             theme::FONT_TITLE
         };
         ui.horizontal(|ui| {
+            if touch {
+                // 顶栏只放一行控件，36 点足够手指点中，也省下 8 点给表格。
+                ui.spacing_mut().interact_size.y = theme::header_height();
+            }
             ui.label(
                 RichText::new("路路通时刻表")
                     .size(title_size)
@@ -929,11 +950,11 @@ impl LltApp {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP_S;
             ui.label(RichText::new("车次").size(theme::FONT_BODY));
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut self.train_query)
-                    .hint_text("例如 G1 / K54 / 1461")
-                    .desired_width(field_width),
-            );
+            let response = ui.add(query_input(
+                &mut self.train_query,
+                "例如 G1 / K54 / 1461",
+                field_width,
+            ));
             self.take_focus(ui, FocusField::Train, &response);
             if response.changed() {
                 self.refresh_train_search();
@@ -1096,11 +1117,11 @@ impl LltApp {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP_S;
             ui.label(RichText::new("车站").size(theme::FONT_BODY));
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut self.station_query)
-                    .hint_text("例如 北京 / 北京南")
-                    .desired_width(field_width),
-            );
+            let response = ui.add(query_input(
+                &mut self.station_query,
+                "例如 北京 / 北京南",
+                field_width,
+            ));
             self.take_focus(ui, FocusField::Station, &response);
             if response.changed() {
                 changed = true;
@@ -1463,11 +1484,7 @@ impl LltApp {
                 }
             }
             // 两个框不再带标签：占位符已经说明了是出发站还是到达站，省下的宽度给输入。
-            let from = ui.add(
-                egui::TextEdit::singleline(&mut self.od_from)
-                    .hint_text("出发站")
-                    .desired_width(field_width),
-            );
+            let from = ui.add(query_input(&mut self.od_from, "出发站", field_width));
             self.take_focus(ui, FocusField::OdFrom, &from);
             if from.changed() {
                 self.od_last = OdField::From;
@@ -1491,11 +1508,7 @@ impl LltApp {
                 changed = true;
             }
 
-            let to = ui.add(
-                egui::TextEdit::singleline(&mut self.od_to)
-                    .hint_text("到达站")
-                    .desired_width(field_width),
-            );
+            let to = ui.add(query_input(&mut self.od_to, "到达站", field_width));
             self.take_focus(ui, FocusField::OdTo, &to);
             if to.changed() {
                 self.od_last = OdField::To;
@@ -1749,6 +1762,10 @@ impl LltApp {
         salt: &str,
     ) -> Option<i64> {
         let width = ui.available_width();
+        // 竖屏（触摸）另用一套六列表：宁可横向滚动，也别把站名和时间挤成省略号。
+        if theme::pointer() == theme::Pointer::Touch && width < theme::OD_TOUCH_SCROLL_WIDTH {
+            return Self::od_rows_table_portrait(ui, rows, running_count, selected, salt);
+        }
         let wide = width >= theme::OD_COLUMNS_MIN_WIDTH;
         // 区段就是查询条件本身，极窄时收起它，把空间留给时刻。
         let show_segment = width >= 560.0;
@@ -1863,6 +1880,97 @@ impl LltApp {
         clicked
     }
 
+    /// 竖屏（触摸）的站站结果表：`状态 车次 出发站 出发时间 到达站 到达时间`。
+    ///
+    /// 六列在 434 点宽的手机上放不下，所以固定列宽 + 横向滚动，而不是压缩它
+    /// （压缩会把「北京朝阳」变成「北京…」、把时刻拆行）。
+    fn od_rows_table_portrait(
+        ui: &mut Ui,
+        rows: &[&OdResult],
+        running_count: usize,
+        selected: Option<i64>,
+        salt: &str,
+    ) -> Option<i64> {
+        const STATUS: f32 = 28.0;
+        const CODE: f32 = 88.0;
+        const STATION: f32 = 84.0;
+        const TIME: f32 = 76.0;
+        let spacing = ui.spacing().item_spacing.x;
+        let total = STATUS + CODE + STATION + TIME + STATION + TIME + spacing * 5.0;
+        let pitch = theme::list_row_height() + ui.spacing().item_spacing.y;
+        let content_height = theme::list_header_height() + rows.len() as f32 * pitch + theme::GAP_S;
+
+        let mut clicked = None;
+        // 只用一个「横竖都能滚」的区域：表格自己不再抢拖动。
+        // 嵌套两个 ScrollArea 时，内层（表格的纵向滚动）会把手指拖动全吃掉，
+        // 结果横向只能拖滚动条——这正是之前的毛病。
+        egui::ScrollArea::both()
+            .id_salt((salt, "scroll"))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                // 给表格一个「比视口宽、比视口高」的容器，它才会按固定列宽铺开。
+                ui.allocate_ui_with_layout(
+                    egui::vec2(total, content_height),
+                    Layout::top_down(Align::Min),
+                    |ui| {
+                        let header_top = ui.cursor().top();
+                        TableBuilder::new(ui)
+                            .id_salt(salt)
+                            .striped(true)
+                            .sense(Sense::click())
+                            .drag_to_scroll(egui::scroll_area::DragScroll::Never)
+                            .auto_shrink([false, false])
+                            .cell_layout(cell_layout())
+                            .column(Column::exact(STATUS))
+                            .column(Column::exact(CODE))
+                            .column(Column::exact(STATION))
+                            .column(Column::exact(TIME))
+                            .column(Column::exact(STATION))
+                            .column(Column::exact(TIME))
+                            .header(theme::list_header_height(), |mut header| {
+                                header.col(|ui| table_head(ui, "状态"));
+                                header.col(|ui| table_head(ui, "车次"));
+                                header.col(|ui| table_head(ui, "出发站"));
+                                header.col(|ui| table_head(ui, "出发时间"));
+                                header.col(|ui| table_head(ui, "到达站"));
+                                header.col(|ui| table_head(ui, "到达时间"));
+                            })
+                            .body(|body| {
+                                body.rows(theme::list_row_height(), rows.len(), |mut row| {
+                                    let hit = rows[row.index()];
+                                    let running = row.index() < running_count;
+                                    row.set_selected(selected == Some(hit.train_index));
+                                    if running_count > 0 && row.index() == running_count {
+                                        row.set_overline(true);
+                                    }
+                                    row.col(|ui| status_cell(ui, running));
+                                    row.col(|ui| train_code_cell(ui, &hit.code, None));
+                                    row.col(|ui| {
+                                        ui.add(egui::Label::new(&hit.from_station).truncate())
+                                            .on_hover_text(&hit.from_station);
+                                    });
+                                    // 出发日期就是查询日期，不标「+N」；到达才可能跨天。
+                                    row.col(|ui| time_cell(ui, &hit.depart, 0));
+                                    row.col(|ui| {
+                                        ui.add(egui::Label::new(&hit.to_station).truncate())
+                                            .on_hover_text(&hit.to_station);
+                                    });
+                                    row.col(|ui| {
+                                        time_cell(ui, &hit.arrive, hit.arrive_day - hit.depart_day);
+                                    });
+                                    if row.response().clicked() {
+                                        clicked = Some(hit.train_index);
+                                    }
+                                });
+                            });
+                        paint_header_line(ui, header_top, theme::list_header_height());
+                    },
+                );
+            });
+
+        clicked
+    }
+
     /// `compact` 为真时（窗口窄、详情在底部），改为左右分栏：
     /// 左边是车次信息，右边是停站表；经由不再内嵌，而是在停站表下方
     /// 放一个入口，点开后用独立页面显示。更窄时改为上下排列。
@@ -1898,12 +2006,9 @@ impl LltApp {
         };
 
         if compact && ui.available_width() < theme::STACKED_DETAIL_MAX_WIDTH {
-            // 更窄时左右分栏会把停站表压到放不下，改成上下排列：
-            // 信息区限高并可滚动，停站表拿到整行宽度，经由入口放在最下面。
+            // 手机上整页只有**一个**滚动块：经由（窄条）→ 时刻表 → 杂项。
+            // 标题栏固定在上面，任何时候都能返回。
             let has_via = !extras.via.is_empty();
-            // 信息区按内容收缩、最多占 45%，其余高度留给停站表；
-            // 内容太长时信息区自己滚动，不会把表格挤没。
-            let info_max = (ui.available_height() * 0.45).clamp(120.0, 240.0);
             header_ui(
                 ui,
                 detail,
@@ -1915,32 +2020,30 @@ impl LltApp {
             ui.separator();
             ui.add_space(theme::GAP_S);
             egui::ScrollArea::vertical()
-                .id_salt("detail_info_scroll_narrow")
-                .max_height(info_max)
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
-                .auto_shrink([false, true])
+                .id_salt("detail_page_scroll")
+                .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    if has_via {
+                        via_page_trigger(ui, &extras.via, &mut via_page_open);
+                        ui.add_space(theme::GAP_S);
+                    }
+                    // 停站表按行数撑开（而不是吃满剩余高度），这样它才会跟页面一起滚。
+                    let pitch = theme::detail_row_height() + ui.spacing().item_spacing.y;
+                    let table_height = theme::detail_header_height()
+                        + detail.stops.len() as f32 * pitch
+                        + theme::GAP_S;
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), table_height),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            if let Some(station) = stops_table_ui(ui, &detail.stops) {
+                                link = Some(DetailLink::Station(station));
+                            }
+                        },
+                    );
+                    ui.add_space(theme::GAP_M);
                     extras_ui(ui, &detail.summary, extras, &detail.stops, date, &mut link);
                 });
-            ui.add_space(theme::GAP_S);
-            ui.separator();
-            ui.add_space(theme::GAP_S);
-            // 经由入口放在表格**上面**：整页时表格会按可用高度铺满，放在下面会被
-            // 挤出可见区（实测指针能命中、但一个像素都画不出来）。
-            if has_via {
-                via_page_trigger(ui, &extras.via, &mut via_page_open);
-                ui.add_space(theme::GAP_S);
-            }
-            let table_height = ui.available_height().max(80.0);
-            ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), table_height),
-                Layout::top_down(Align::Min),
-                |ui| {
-                    if let Some(station) = stops_table_ui(ui, &detail.stops) {
-                        link = Some(DetailLink::Station(station));
-                    }
-                },
-            );
         } else if compact {
             let height = ui.available_height();
             let left_width = (ui.available_width() * 0.42).clamp(260.0, 460.0);
@@ -2361,7 +2464,7 @@ impl LltApp {
             egui::Panel::bottom("tab_bar_bottom")
                 .frame(theme::bar_frame(ui))
                 .show(ui, |ui| self.tab_bar_segments(ui));
-            if self.tab != Tab::Data {
+            if self.action_bar_needed() {
                 egui::Panel::bottom("action_bar")
                     .frame(theme::bar_frame(ui))
                     .show(ui, |ui| self.action_bar(ui));
@@ -2392,6 +2495,15 @@ impl LltApp {
     /// 是否是触摸屏（底栏只在触摸屏上出现；桌面保持原来的三行头部）。
     fn bottom_bar(&self) -> bool {
         self.platform.pointer == theme::Pointer::Touch
+    }
+
+    /// 当前页有没有动作可放：车次页在没输入时只有一行空栏，不如收起来。
+    fn action_bar_needed(&self) -> bool {
+        match self.tab {
+            Tab::Data => false,
+            Tab::Train => !self.train_query.trim().is_empty(),
+            _ => true,
+        }
     }
 
     /// 底栏的动作行：把「不是输入框、又占表格上方空间」的控件收在这里。
@@ -2582,6 +2694,19 @@ impl LltApp {
 }
 
 // ---------------------------------------------------------------- 辅助函数
+
+/// 查询输入框。触摸屏上文字居中（水平和垂直），鼠标端保持默认的左对齐。
+fn query_input<'a>(text: &'a mut String, hint: &str, width: f32) -> egui::TextEdit<'a> {
+    let edit = egui::TextEdit::singleline(text)
+        .hint_text(hint)
+        .desired_width(width);
+    if theme::pointer() == theme::Pointer::Touch {
+        // 44 点的框里文字贴左上角很难看，居中更像系统输入框。
+        edit.align(egui::Align2::CENTER_CENTER)
+    } else {
+        edit
+    }
+}
 
 /// 首帧根据屏幕大小收敛一次窗口尺寸，避免高 DPI/远程桌面下窗口超出屏幕。
 fn fit_window(ctx: &egui::Context) {

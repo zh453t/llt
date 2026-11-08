@@ -146,8 +146,27 @@ impl ImeBridgeTrait for Bridge {
         set_active(focused);
     }
 
+    fn ensure_shown(&self) {
+        call_static("ensureActive", &[]);
+    }
+
     fn attach_context(&self, ctx: &egui::Context) {
         let _ = EGUI_CTX.set(ctx.clone());
+    }
+}
+
+/// 调 `ImeBridge` 上的静态方法（需要参数时自己拼 `JValue`）。
+fn call_static(method: &str, args: &[JValue<'_, '_>]) {
+    let Some(app) = APP.get() else {
+        return;
+    };
+    let result = with_class(app, |env, class| {
+        let signature = if args.is_empty() { "()V" } else { "(Z)V" };
+        env.call_static_method(class, method, signature, args)?;
+        Ok(())
+    });
+    if let Err(err) = result {
+        eprintln!("输入法调用 {method} 失败：{err}");
     }
 }
 
