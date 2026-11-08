@@ -161,12 +161,20 @@ Studio 更新会替换自带的 `jbr`（JDK）、并可能顺带更新 SDK 组�
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| `Unsupported class file major version 68`（或类似） | Studio 把 jbr 升到了 JDK 24+，Gradle 8.13 只支持到 JDK 23 | 把 `JAVA_HOME` 指回旧 jbr / 别处装的 JDK 21，或把 `GRADLE_HOME` 换到 Gradle 8.14+（同时可能要升 AGP） |
+| `Unsupported class file major version 68`（或类似） | Studio 把 jbr 升到了 JDK 24+，Gradle 8.13 只支持到 JDK 23 | 设 `LLT_GRADLE_JAVA_HOME` 指向一个 JDK 17–23（只给 Gradle 用，不动系统 `JAVA_HOME`），或把 `GRADLE_HOME` 换到 Gradle 8.14+（可能还要升 AGP） |
 | `Failed to find Build Tools revision ...` | build-tools 被移走 | SDK Manager 装 `build-tools;34.0.0` |
 | `platforms;android-34` 缺失提示 | 同上 | 装 `platforms;android-34`，或改 `app/build.gradle.kts` 的 `compileSdk` |
 | `NDK not found` / `cargo ndk` 报找不到 NDK | Studio 重装时删了 NDK | 重新解压 r27d 到 `$ANDROID_HOME
 dk.3.13750724`（`build.ps1` 取 `ndk/` 下最新一版） |
+| 升级 Studio 时提示「`jbr` 被占用，无法删除」 | Gradle 守护进程是拿 `jbr` 起的 `java.exe`，它活着目录就删不掉 | 先跑 `pwsh -File android/stop-java.ps1`（先试 `gradle --stop`，不行就按路径结束进程），再升级 |
+| `gradle --stop` 报 `could not open .../jbr/lib/jvm.cfg` | 升级已经把 `jbr` 删了一半，Gradle 自己都起不来 | 同上，用 `stop-java.ps1` 兜底 |
 | 依赖下载全部失败且报 `SSL misconfiguration` | `~/.gradle/gradle.properties` 里的代理没开 | 项目里的 `android/gradle.properties` 已用 `systemProp.*.nonProxyHosts=*` 绕开；要用代理就改那两行 |
+
+**升级前**先停掉占用 `jbr` 的守护进程，否则 Studio 会提示文件被占用删不掉：
+
+```powershell
+pwsh -File android/stop-java.ps1     # 先 gradle --stop，失败再按路径结束 java.exe
+```
 
 更新完想确认没坏，跑一遍：
 

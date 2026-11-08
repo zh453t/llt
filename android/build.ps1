@@ -57,6 +57,21 @@ if (-not $env:JAVA_HOME -and -not (Get-Command java -ErrorAction SilentlyContinu
     }
     $env:JAVA_HOME = $jbr
 }
+# Studio 升级会把这个 jbr 换成新版本（可能是 Java 24+，Gradle 8.13 跑不动）。
+# 这里允许用 LLT_GRADLE_JAVA_HOME 指定一个「只给 Gradle 用」的 JDK，不动 JAVA_HOME。
+if ($env:LLT_GRADLE_JAVA_HOME) {
+    if (-not (Test-Path (Join-Path $env:LLT_GRADLE_JAVA_HOME 'bin/java.exe'))) {
+        throw "LLT_GRADLE_JAVA_HOME 指向的目录里没有 bin/java.exe：$env:LLT_GRADLE_JAVA_HOME"
+    }
+    $env:JAVA_HOME = $env:LLT_GRADLE_JAVA_HOME
+}
+# Studio 升级到一半时 jbr 只剩半套文件（java.exe 在、lib/jvm.cfg 没了），
+# 直接跑会得到一句难懂的 "could not open .../lib/jvm.cfg"。
+if ($env:JAVA_HOME -and
+    (Test-Path (Join-Path $env:JAVA_HOME 'bin/java.exe')) -and
+    -not (Test-Path (Join-Path $env:JAVA_HOME 'lib/jvm.cfg'))) {
+    throw "JDK 不完整（缺 lib/jvm.cfg）：$env:JAVA_HOME — Android Studio 大概正在升级 jbr，等它装完再跑；急用可设 LLT_GRADLE_JAVA_HOME 指向一个完整的 JDK 17–23。"
+}
 if ($env:JAVA_HOME) {
     $env:PATH = (Join-Path $env:JAVA_HOME 'bin') + [IO.Path]::PathSeparator + $env:PATH
 }
@@ -73,7 +88,7 @@ Write-Host "JAVA: $env:JAVA_HOME ($java_version)"
 # Android Studio 更新会换掉自带的 jbr（JDK 版本）和 SDK 组件，先把前置条件摊开：
 # 失败时不用再去猜是 JDK 太新、还是 platform/build-tools 被移走了。
 if ($java_major -gt 23) {
-    Write-Warning "JDK $java_major 高于 Gradle 8.13 支持的上限（23）。Studio 更新后如果构建报 "Unsupported class file major version"，请把 `$env:JAVA_HOME 指回旧版 jbr，或把 GRADLE_HOME 换到 Gradle 8.14+。"
+    Write-Warning "JDK $java_major 高于 Gradle 8.13 支持的上限（23）。用 LLT_GRADLE_JAVA_HOME 指定一个 JDK 17–23（只影响 Gradle），或把 GRADLE_HOME 换到 Gradle 8.14+。"
 }
 if (-not (Test-Path (Join-Path $env:ANDROID_HOME 'platforms/android-34'))) {
     Write-Warning "缺少 SDK platform 34（compileSdk）。用 SDK Manager 装 platforms;android-34，或改 app/build.gradle.kts 的 compileSdk。"
