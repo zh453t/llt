@@ -1446,9 +1446,11 @@ impl LltApp {
 
     fn od_ui(&mut self, ui: &mut Ui) {
         let width = ui.available_width();
-        let field_width = ((width - 300.0) / 2.0).clamp(110.0, 170.0);
+        // 两个输入框 + 中间的交换按钮：按钮占一个控件的高度，两侧留一点间距。
+        let swap_width = theme::control_height();
+        let field_width = ((width - swap_width - theme::GAP_S * 3.0) / 2.0).clamp(110.0, 200.0);
         let mut changed = false;
-        // 触摸屏上「模糊 / 交换 / 查询」在底栏（`od_bar`），这里只留两个输入框。
+        // 触摸屏上「模糊 / 查询」在底栏（`od_bar`），这里只留两个输入框与交换按钮。
         let bar = self.bottom_bar();
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP_S;
@@ -1460,10 +1462,10 @@ impl LltApp {
                     changed = true;
                 }
             }
-            ui.label(RichText::new("出发").size(theme::FONT_BODY));
+            // 两个框不再带标签：占位符已经说明了是出发站还是到达站，省下的宽度给输入。
             let from = ui.add(
                 egui::TextEdit::singleline(&mut self.od_from)
-                    .hint_text("北京")
+                    .hint_text("出发站")
                     .desired_width(field_width),
             );
             self.take_focus(ui, FocusField::OdFrom, &from);
@@ -1476,15 +1478,22 @@ impl LltApp {
             // 不受宽屏限制：此时键盘已经在这个输入框上，跳一格不会额外弹键盘。
             let advance = from.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
-            if !bar && ui.add(egui::Button::new(meta("交换"))).clicked() {
+            // 交换放在两个框中间：箭头方向就是「对调」的意思。
+            // 「⇌」在 15 点字里偏小，单独放大到 22 点，按下时和两侧输入框等高。
+            let swap = ui
+                .add(
+                    egui::Button::new(RichText::new("⇌").size(22.0))
+                        .min_size(egui::vec2(swap_width, theme::control_height())),
+                )
+                .on_hover_text("对调出发站与到达站");
+            if swap.clicked() {
                 std::mem::swap(&mut self.od_from, &mut self.od_to);
                 changed = true;
             }
 
-            ui.label(RichText::new("到达").size(theme::FONT_BODY));
             let to = ui.add(
                 egui::TextEdit::singleline(&mut self.od_to)
-                    .hint_text("上海")
+                    .hint_text("到达站")
                     .desired_width(field_width),
             );
             self.take_focus(ui, FocusField::OdTo, &to);
@@ -2387,7 +2396,7 @@ impl LltApp {
 
     /// 底栏的动作行：把「不是输入框、又占表格上方空间」的控件收在这里。
     ///
-    /// 每个标签页只放当前这页用得上的：查询 / 清空 / 模糊 / 交换，右侧是这一页的
+    /// 每个标签页只放当前这页用得上的：查询 / 清空 / 模糊，右侧是这一页的
     /// 计数（原来那一行「当日开行 N 趟」）。数据页不需要动作行。
     fn action_bar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
@@ -2401,7 +2410,7 @@ impl LltApp {
         });
     }
 
-    /// 站站查询的动作行：模糊 / 交换 / 查询。
+    /// 站站的动作行：模糊 / 查询（「交换」在两个输入框中间，不在这里）。
     fn od_bar(&mut self, ui: &mut Ui) {
         let height = theme::control_height();
         let mut changed = false;
@@ -2410,13 +2419,6 @@ impl LltApp {
             .on_hover_text("模糊搜索：出发/到达按城市或同城组匹配所有车站")
             .changed()
         {
-            changed = true;
-        }
-        if ui
-            .add(egui::Button::new(meta("交换")).min_size(egui::vec2(0.0, height)))
-            .clicked()
-        {
-            std::mem::swap(&mut self.od_from, &mut self.od_to);
             changed = true;
         }
         let can_query = !self.od_from.trim().is_empty() && !self.od_to.trim().is_empty();
