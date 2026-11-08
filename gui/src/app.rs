@@ -1025,6 +1025,7 @@ impl LltApp {
             ui.spacing_mut().item_spacing.x = theme::GAP_S;
             ui.label(RichText::new("车次").size(theme::FONT_BODY));
             let response = ui.add(query_input(
+                "train",
                 &mut self.train_query,
                 "例如 G1 / K54 / 1461",
                 field_width,
@@ -1213,7 +1214,12 @@ impl LltApp {
             let reserve = 52.0 + 112.0 + theme::GAP_S * 2.0;
             let field_width = (rest - reserve).clamp(90.0, 240.0);
             // 车站输入框不放占位符：候选站就在下面，写例子只是多一层噪音。
-            let response = ui.add(query_input(&mut self.station_query, "", field_width));
+            let response = ui.add(query_input(
+                "station",
+                &mut self.station_query,
+                "",
+                field_width,
+            ));
             self.take_focus(ui, FocusField::Station, &response);
             if response.changed() {
                 changed = true;
@@ -1595,7 +1601,12 @@ impl LltApp {
             let field_width =
                 ((rest - swap_width - theme::GAP_S * 2.0) / 2.0 - INPUT_CHROME).clamp(96.0, 200.0);
             // 两个框不再带标签：占位符已经说明了是出发站还是到达站，省下的宽度给输入。
-            let from = ui.add(query_input(&mut self.od_from, "出发站", field_width));
+            let from = ui.add(query_input(
+                "od-from",
+                &mut self.od_from,
+                "出发站",
+                field_width,
+            ));
             self.take_focus(ui, FocusField::OdFrom, &from);
             if from.changed() {
                 self.od_last = OdField::From;
@@ -1622,7 +1633,7 @@ impl LltApp {
                 changed = true;
             }
 
-            let to = ui.add(query_input(&mut self.od_to, "到达站", field_width));
+            let to = ui.add(query_input("od-to", &mut self.od_to, "到达站", field_width));
             self.take_focus(ui, FocusField::OdTo, &to);
             if to.changed() {
                 self.od_last = OdField::To;
@@ -3037,8 +3048,20 @@ fn swap_glyph_size(ui: &Ui, button_size: f32) -> f32 {
 }
 
 /// 查询输入框。触摸屏上文字居中（水平和垂直），鼠标端保持默认的左对齐。
-fn query_input<'a>(text: &'a mut String, hint: &str, width: f32) -> egui::TextEdit<'a> {
+/// 查询输入框。
+///
+/// `salt` 必须给一个固定值：这几个输入框所在的布局会随结果有无、底栏位置变化
+/// （`TabPart` 的 Input / Results / Stacked 三态），自动 id 跟着位置走，一刷新
+/// 就变成“另一个输入框”——egui 的焦点随即丢掉，表现是**只能打进第一个字符**
+/// （之后的输入法上屏事件因为没有焦点全被丢弃）。
+fn query_input<'a>(
+    salt: &'static str,
+    text: &'a mut String,
+    hint: &str,
+    width: f32,
+) -> egui::TextEdit<'a> {
     let edit = egui::TextEdit::singleline(text)
+        .id(egui::Id::unique(salt))
         .hint_text(hint)
         .desired_width(width);
     if theme::pointer() == theme::Pointer::Touch {
@@ -3991,17 +4014,21 @@ fn run_plan_ui(ui: &mut Ui, train: &TrainSummary, plan: &mut RunPlan<'_>, with_t
         *plan.month = this_month;
     }
 
+    let cell = theme::plan_cell_size(ui.available_width());
     ui.horizontal(|ui| {
         // 弹窗自己有标题，这里只留区间与翻月。
         if with_title {
             ui.label(bold("开行计划").size(theme::FONT_BODY));
             ui.add_space(theme::GAP_S);
         }
-        ui.label(meta(date_window(train.date_from, train.date_to)).weak());
+        // 先排右侧的翻月（从右往左），剩下的宽度才给区间文字：区间可能写到
+        // 「2050-12-31」，先画它会把两个按钮挤出页面（实测右侧箭头被裁掉）。
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP_XS;
+            // 按钮边长跟着格子走：触摸屏的 44 点 interact_size 会把它们撑成高药丸。
+            ui.spacing_mut().interact_size = egui::vec2(cell, cell * 0.8);
             if ui
-                .add(egui::Button::new(meta("›")).min_size(egui::vec2(26.0, 24.0)))
+                .add(egui::Button::new(meta("›")))
                 .on_hover_text("下一个月")
                 .clicked()
             {
@@ -4009,12 +4036,19 @@ fn run_plan_ui(ui: &mut Ui, train: &TrainSummary, plan: &mut RunPlan<'_>, with_t
             }
             ui.label(meta(month_label(*plan.month)));
             if ui
-                .add(egui::Button::new(meta("‹")).min_size(egui::vec2(26.0, 24.0)))
+                .add(egui::Button::new(meta("‹")))
                 .on_hover_text("上一个月")
                 .clicked()
             {
                 *plan.month = shift_month(*plan.month, -1);
             }
+            // 剩余空间给区间，超宽用省略号收尾，不把这一行顶破。
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                ui.add(
+                    egui::Label::new(meta(date_window(train.date_from, train.date_to)).weak())
+                        .truncate(),
+                );
+            });
         });
     });
 
@@ -4028,7 +4062,6 @@ fn run_plan_ui(ui: &mut Ui, train: &TrainSummary, plan: &mut RunPlan<'_>, with_t
     let lead = i64::from(first.weekday().to_monday_zero_offset());
     let today_ymd = ymd(today());
 
-    let cell = theme::plan_cell();
     let visuals = ui.visuals().clone();
     let running_fg = visuals.hyperlink_color;
     let running_bg = visuals.selection.bg_fill;

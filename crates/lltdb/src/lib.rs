@@ -168,6 +168,8 @@ pub struct Db {
     conn: Connection,
     /// 车次列清单：老库没有 `rule_index` 列时换成 `NULL` 占位。
     train_columns: &'static str,
+    /// 车站 / 站站查询里取 `rule_index` 的那一段，同上。
+    rule_column: &'static str,
 }
 
 impl Db {
@@ -206,9 +208,11 @@ impl Db {
         } else {
             TRAIN_COLUMNS_LEGACY
         };
+        let rule_column = if has_rule { "t.rule_index" } else { "NULL" };
         Ok(Self {
             conn,
             train_columns,
+            rule_column,
         })
     }
 
@@ -357,11 +361,12 @@ impl Db {
         let sql = format!(
             "SELECT s.station, t.train_index, t.train, t.type, t.first_station, t.last_station,
                     s.arrive, s.depart, s.dwell_min, s.day, s.km, t.date_from, t.date_to,
-                    t.rule_index
+                    {}
              FROM stops s
              JOIN trains t ON t.train_index = s.train_index
              WHERE s.station_index IN ({placeholders})
-             ORDER BY s.depart, s.depart_min, t.train"
+             ORDER BY s.depart, s.depart_min, t.train",
+            self.rule_column
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params_from_iter(indices.iter()), |row| {
@@ -424,14 +429,15 @@ impl Db {
                     s1.depart, s1.depart_min, s1.day, s1.km,
                     s2.arrive, s2.arrive_min, s2.day, s2.km,
                     s1.station, s2.station,
-                    t.date_from, t.date_to, t.rule_index
+                    t.date_from, t.date_to, {}
              FROM stops s1
              JOIN stops s2 ON s2.train_index = s1.train_index AND s2.seq > s1.seq
              JOIN trains t ON t.train_index = s1.train_index
              WHERE s1.station_index IN ({from_marks})
                AND s2.station_index IN ({to_marks})
              ORDER BY s1.depart, s1.depart_min, t.train
-             LIMIT ?"
+             LIMIT ?",
+            self.rule_column
         );
         let mut params: Vec<i64> = from_indices.iter().chain(to_indices).copied().collect();
         params.push((limit as i64) + 1);
@@ -628,9 +634,16 @@ mod tests {
                  CREATE TABLE trains (train_index INTEGER PRIMARY KEY, train TEXT NOT NULL,
                      train_no TEXT, type TEXT, date_from INTEGER, date_to INTEGER,
                      total_km INTEGER, days INTEGER, first_station TEXT, last_station TEXT);
-                 CREATE TABLE stops (train_index INTEGER, station TEXT, seq INTEGER);
+                 CREATE TABLE stops (train_index INTEGER, train TEXT, seq INTEGER,
+                     station_index INTEGER, station TEXT, km INTEGER, arrive TEXT, depart TEXT,
+                     dwell_min INTEGER, day INTEGER, arrive_min INTEGER, depart_min INTEGER);
+                 INSERT INTO stations VALUES (0, '北京'), (1, '上海');
                  INSERT INTO trains VALUES (7, 'K54', '54', '新空调快速', 20260101, 20261231,
-                                            1000, 1, '北京', '上海');",
+                                            1000, 1, '北京', '上海');
+                 INSERT INTO stops VALUES (7, 'K54', 1, 0, '北京', 0, '08:00', '08:00', 0, 1,
+                                           480, 480),
+                                          (7, 'K54', 2, 1, '上海', 1000, '18:00', '18:00', 0, 1,
+                                           1080, 1080);",
             )
             .unwrap();
         }
@@ -644,6 +657,14 @@ mod tests {
         // 没有周期表：区间内一律开行。
         let state = db.run_state(&hits[0], 20260601);
         assert_eq!(state, date::RunState::Running);
+        // 车站 / 站站查询的 SQL 里也带着 rule_index，老库要能跑通（曾经在这里炸成
+        // 「站站查询失败：no such column: t.rule_index」）。
+        let board = db.station_board_multi(&[0]).unwrap();
+        assert_eq!(board.len(), 1);
+        assert_eq!(board[0].rule_index, None);
+        let (od, _) = db.od_search_multi(&[0], &[1], 10).unwrap();
+        assert_eq!(od.len(), 1);
+        assert_eq!(od[0].rule_index, None);
         let _ = std::fs::remove_file(&path);
     }
 

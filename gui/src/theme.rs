@@ -148,12 +148,19 @@ pub fn detail_header_height() -> f32 {
     }
 }
 
-/// 开行计划日历的格子边长。
+/// 开行计划日历的格子边长（下限）。
 pub fn plan_cell() -> f32 {
     match pointer() {
         Pointer::Mouse => 22.0,
         Pointer::Touch => 32.0,
     }
+}
+
+/// 一行七格的边长：按可用宽度摊开，最小取 [`plan_cell`]，最大 48 点。
+///
+/// 手机上整行铺满、桌面上不至于把格子拉成大方块；两侧各留 6 点余量给行间距。
+pub fn plan_cell_size(available: f32) -> f32 {
+    ((available - 12.0) / 7.0).clamp(plan_cell(), 48.0)
 }
 
 /// 滚动条宽度：触摸时拉宽，不然拖不住。
