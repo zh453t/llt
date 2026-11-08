@@ -110,15 +110,14 @@ public final class ImeBridge extends View {
         bridge.post(new Runnable() {
             @Override
             public void run() {
-                if (!bridge.hasFocus() && !bridge.requestFocus()) {
-                    return;
-                }
                 InputMethodManager imm =
                         (InputMethodManager) bridge
                                 .getContext()
                                 .getSystemService(Context.INPUT_METHOD_SERVICE);
-                // 不能用 `imm.isActive()` 当开关：键盘已经收起时它仍可能是 true。
-                // `showSoftInput` 在对端已显示时是空操作，所以无条件调一次最稳。
+                // 只 show，不 requestFocus：桥 View 已经拿着焦点，重新请求会把
+                // InputConnection 换掉，正在连续输入的按键/上屏会被丢掉
+                // （实测：`adb input text K1061` 只剩第一个字符）。
+                // 也不能用 `imm.isActive()` 当开关：键盘收起时它仍可能是 true。
                 if (imm != null) {
                     imm.showSoftInput(bridge, 0);
                 }

@@ -3121,12 +3121,76 @@ fn header_ui(
 ) {
     let route = format!("{} → {}", detail.summary.first, detail.summary.last);
     ui.horizontal(|ui| {
-        ui.label(bold(&detail.summary.code).size(theme::FONT_CODE));
-        if compact {
-            ui.add_space(theme::GAP_S);
-            ui.add(egui::Label::new(RichText::new(&route).size(theme::FONT_BODY)).truncate())
-                .on_hover_text(&route);
-        }
+        // 先把右侧按钮/上一个车次的宽度量出来留好：`right_to_left` 是叠加，
+        // 不预留的话长车次号（K1061/K1064）会把「始发 → 终到」压到按钮底下。
+        let reserve = {
+            let pad = 2.0 * ui.spacing().button_padding.x;
+            let measure = |text: &str| {
+                ui.ctx().fonts_mut(|fonts| {
+                    fonts
+                        .layout_no_wrap(
+                            text.to_owned(),
+                            egui::FontId::proportional(theme::FONT_META),
+                            egui::Color32::PLACEHOLDER,
+                        )
+                        .size()
+                        .x
+                })
+            };
+            let close = measure(state.close_label) + pad;
+            let previous = previous
+                .map(|(_, code)| measure(&format!("← {code}")) + theme::GAP_S)
+                .unwrap_or(0.0);
+            close + previous + theme::GAP_S
+        };
+        let title_width = (ui.available_width() - reserve).max(96.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(title_width, 0.0),
+            Layout::top_down(Align::Min),
+            |ui| {
+                // 一行放不下就整体换行（车次一行、始发 → 终到一行），
+                // 而不是把「哈尔滨西」从中间掰开或被返回按钮压住。
+                let route_width = ui.ctx().fonts_mut(|fonts| {
+                    fonts
+                        .layout_no_wrap(
+                            route.clone(),
+                            egui::FontId::proportional(theme::FONT_BODY),
+                            egui::Color32::PLACEHOLDER,
+                        )
+                        .size()
+                        .x
+                });
+                let code_width = ui.ctx().fonts_mut(|fonts| {
+                    fonts
+                        .layout_no_wrap(
+                            detail.summary.code.clone(),
+                            egui::FontId::new(theme::FONT_CODE, fonts::bold_family()),
+                            egui::Color32::PLACEHOLDER,
+                        )
+                        .size()
+                        .x
+                });
+                let fits = code_width + theme::GAP_S + route_width <= title_width;
+                if compact && !fits {
+                    ui.label(bold(&detail.summary.code).size(theme::FONT_CODE));
+                    ui.add(egui::Label::new(
+                        RichText::new(&route).size(theme::FONT_BODY),
+                    ))
+                    .on_hover_text(&route);
+                } else {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(bold(&detail.summary.code).size(theme::FONT_CODE));
+                        if compact {
+                            ui.add_space(theme::GAP_S);
+                            ui.add(egui::Label::new(
+                                RichText::new(&route).size(theme::FONT_BODY),
+                            ))
+                            .on_hover_text(&route);
+                        }
+                    });
+                }
+            },
+        );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ui.add(egui::Button::new(meta(state.close_label))).clicked() {
                 state.close = true;
