@@ -3082,6 +3082,8 @@ fn via_table_ui(
         .collect();
 
     let width = ui.available_width();
+    // 触摸屏（手机）线路列可能按 `/` 拆成多行，行高要跟着变。
+    let multiline = theme::pointer() == theme::Pointer::Touch;
     let show_km = width >= 300.0;
     let station_width = (width * 0.32).clamp(96.0, 132.0);
     let header_top = ui.cursor().top();
@@ -3109,9 +3111,8 @@ fn via_table_ui(
                 header.col(|ui| table_head_right(ui, "里程"));
             }
         })
-        .body(|body| {
-            body.rows(theme::detail_row_height(), shown.len(), |mut row| {
-                let index = row.index();
+        .body(|mut body| {
+            let draw = |mut row: egui_extras::TableRow<'_, '_>, index: usize| {
                 let point = shown[index];
                 let is_stop = stop_names.contains(point.station.as_str());
                 // 跨线站的线路名会写成 `京包张包段/包西线`（两条线共用本站）。
@@ -3151,25 +3152,66 @@ fn via_table_ui(
                         });
                 });
                 row.col(|ui| {
-                    let text = RichText::new(&point.line);
-                    let text = if changed {
-                        text.color(ui.visuals().warn_fg_color)
+                    let warn = ui.visuals().warn_fg_color;
+                    let tip = if changed {
+                        format!("由此进入 {}", new_lines.join(" / "))
                     } else {
-                        text
+                        point.line.clone()
                     };
-                    ui.add(egui::Label::new(text).truncate())
-                        .on_hover_text(if changed {
-                            format!("由此进入 {}", new_lines.join(" / "))
+                    // 跨线站的线路名写作 `A/B`（共用本站）。触摸屏上不再截成「A/…」，
+                    // 而是按 `/` 拆开、每条线占一行；行高由下面的循环按段数放大。
+                    if multiline && point.line.contains('/') {
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            for segment in point.line.split('/').map(str::trim) {
+                                if segment.is_empty() {
+                                    continue;
+                                }
+                                let mut text = RichText::new(segment).size(theme::FONT_META);
+                                if changed {
+                                    text = text.color(warn);
+                                }
+                                ui.label(text);
+                            }
+                        })
+                        .response
+                        .on_hover_text(tip);
+                    } else {
+                        let text = if changed {
+                            RichText::new(&point.line).color(warn)
                         } else {
-                            point.line.clone()
-                        });
+                            RichText::new(&point.line)
+                        };
+                        ui.add(egui::Label::new(text).truncate()).on_hover_text(tip);
+                    }
                 });
                 if show_km {
                     row.col(|ui| {
                         right_label(ui, format!("{} km", point.km));
                     });
                 }
-            });
+            };
+            if multiline {
+                // 线路被拆成多行的行要更高，只能逐行给高度（放弃虚拟化；
+                // 经由点最多百来条，比表格里几千行轻得多）。
+                for (index, point) in shown.iter().enumerate() {
+                    let segments = point
+                        .line
+                        .split('/')
+                        .filter(|segment| !segment.trim().is_empty())
+                        .count()
+                        .max(1);
+                    let extra = (segments as f32 - 1.0) * (theme::FONT_META + 4.0);
+                    body.row(theme::detail_row_height() + extra, |row| {
+                        draw(row, index);
+                    });
+                }
+            } else {
+                body.rows(theme::detail_row_height(), shown.len(), |row| {
+                    let index = row.index();
+                    draw(row, index);
+                });
+            }
         });
     paint_header_line(ui, header_top, theme::detail_header_height());
 }
@@ -3512,6 +3554,8 @@ fn via_page_ui(
     screen: egui::Vec2,
 ) {
     let ctx = ui.ctx().clone();
+    // 触摸屏（手机）走更精简的抬头与可换行的线路列。
+    let touch = theme::pointer() == theme::Pointer::Touch;
     // 窄屏留 12 点边距，基本就是整页；宽屏改成封顶 760×82% 的居中弹窗。
     let page = if compact {
         (screen - egui::vec2(24.0, 24.0)).max(egui::vec2(240.0, 240.0))
@@ -3558,12 +3602,18 @@ fn via_page_ui(
                             *open = false;
                         }
                         ui.add_space(theme::GAP_S);
-                        ui.label(bold("经由").size(theme::FONT_SECTION));
-                        ui.add_space(theme::GAP_S);
-                        ui.label(bold(&detail.summary.code).size(theme::FONT_BODY));
-                        ui.add_space(theme::GAP_XS);
-                        ui.add(egui::Label::new(meta(&route)).truncate())
-                            .on_hover_text(&route);
+                        // Android：抬头只留粗体车次（路由在表格里已经写全，不必重复）；
+                        // 桌面保持「经由 + 车次 + 路由」的完整抬头。
+                        if touch {
+                            ui.label(bold(&detail.summary.code).size(theme::FONT_SECTION));
+                        } else {
+                            ui.label(bold("经由").size(theme::FONT_SECTION));
+                            ui.add_space(theme::GAP_S);
+                            ui.label(bold(&detail.summary.code).size(theme::FONT_BODY));
+                            ui.add_space(theme::GAP_XS);
+                            ui.add(egui::Label::new(meta(&route)).truncate())
+                                .on_hover_text(&route);
+                        }
                     },
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
