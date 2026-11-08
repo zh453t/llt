@@ -275,6 +275,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::progress::Silent;
 
     fn fixture() -> Option<PathBuf> {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../out/data/an.db");
@@ -287,7 +288,7 @@ mod tests {
             return;
         };
         let tmp = tempfile::tempdir().unwrap();
-        let shards = crate::archive::unpack(&archive, tmp.path(), true).unwrap();
+        let shards = crate::archive::unpack(&archive, tmp.path(), &Silent).unwrap();
         let data = load(&shards).unwrap();
 
         assert!(data.stations.len() > 3_000, "{}", data.stations.len());

@@ -7,10 +7,10 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-/// 官方数据包地址（容器是 zip，文件名却叫 an.db）。
-pub const DEFAULT_DATA_URL: &str = "http://down.lltskb.com/an.db";
 /// 官方版本接口（`version.data` 即数据版本，见 `tools/check_update.py`）。
-pub const DEFAULT_VER_URL: &str = "http://down.lltskb.com/android.ver";
+///
+/// 数据包地址在 `lltdata` 里（`DEFAULT_DATA_URL`），CLI 只在帮助文本里提到它。
+pub const DEFAULT_VER_URL: &str = lltdata::DEFAULT_VERSION_URL;
 
 const EXAMPLES: &str = "\
 示例：

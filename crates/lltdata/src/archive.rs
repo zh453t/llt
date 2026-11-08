@@ -3,6 +3,7 @@
 //! 解包后统一通过 [`ShardDir`] 访问；分片名在包里是大写（`T0.dat` / `S0.dat`），
 //! App 与本工具按小写引用，因此这里做大小写无关的解析。
 
+use crate::progress::Progress;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
@@ -107,7 +108,7 @@ impl ShardDir {
 /// 把输入（zip 数据包或已解包目录）准备成可读取的分片目录。
 ///
 /// zip 时解包到 `work/an`，返回的目录随调用方的临时目录一起清理。
-pub fn unpack(input: &Path, work: &Path, quiet: bool) -> Result<ShardDir> {
+pub fn unpack(input: &Path, work: &Path, progress: &dyn Progress) -> Result<ShardDir> {
     let meta = fs::metadata(input).with_context(|| format!("无法访问输入 {}", input.display()))?;
 
     if meta.is_dir() {
@@ -116,9 +117,7 @@ pub fn unpack(input: &Path, work: &Path, quiet: bool) -> Result<ShardDir> {
         return Ok(shards);
     }
 
-    if !quiet {
-        eprintln!("解包 {} …", input.display());
-    }
+    progress.note(&format!("解包 {} …", input.display()));
     let dir = work.join("an");
     fs::create_dir_all(&dir).with_context(|| format!("无法创建临时解包目录 {}", dir.display()))?;
 
@@ -126,9 +125,7 @@ pub fn unpack(input: &Path, work: &Path, quiet: bool) -> Result<ShardDir> {
 
     let shards = ShardDir::new(&dir)?;
     ensure_complete(&shards)?;
-    if !quiet {
-        eprintln!("解包完成：{}", dir.display());
-    }
+    progress.note(&format!("解包完成：{}", dir.display()));
     Ok(shards)
 }
 
@@ -220,6 +217,7 @@ pub fn summarize(names: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::progress::Silent;
 
     fn fixture() -> Option<PathBuf> {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../out/data/an.db");
@@ -232,7 +230,7 @@ mod tests {
             return;
         };
         let tmp = tempfile::tempdir().unwrap();
-        let shards = unpack(&archive, tmp.path(), true).unwrap();
+        let shards = unpack(&archive, tmp.path(), &Silent).unwrap();
         assert!(shards.has("s.i") && shards.has("t.i"));
         assert!(shards.has("t19.dat") && shards.has("s9.dat"));
         assert!(shards.read("s.i").unwrap().len() > 1000);
@@ -247,7 +245,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let bogus = tmp.path().join("an.db");
         fs::write(&bogus, b"not a zip").unwrap();
-        let err = unpack(&bogus, tmp.path(), true).unwrap_err().to_string();
+        let err = unpack(&bogus, tmp.path(), &Silent).unwrap_err().to_string();
         assert!(err.contains("不是 zip"), "{err}");
     }
 

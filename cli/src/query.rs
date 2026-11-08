@@ -16,8 +16,8 @@ use lltdb::extras::{DiningCar, Duty, SameCityGroup, ViaPoint};
 use lltdb::{Db, OdResult, StationStop, Stop, TrainSummary};
 
 use crate::cli::{OdArgs, QueryArgs, QueryCommand, QueryOpts, StationArgs, StopsArgs, TrainArgs};
-use crate::format::train_no;
 use crate::table::Table;
+use lltdata::format::train_no;
 
 /// 站到站查询取候选的上限：先取够，再按日期过滤并自行截断。
 const OD_FETCH_LIMIT: usize = 100_000;

@@ -85,7 +85,7 @@ impl RemoteVersion {
         match explicit {
             Some(url) => vec![url.to_owned()],
             None if !self.data_urls.is_empty() => self.data_urls.clone(),
-            None => vec![crate::cli::DEFAULT_DATA_URL.to_owned()],
+            None => vec![crate::DEFAULT_DATA_URL.to_owned()],
         }
     }
 

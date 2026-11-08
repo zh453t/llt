@@ -1,5 +1,5 @@
 [workspace]
-members = ["cli", "gui", "crates/lltdb"]
+members = ["cli", "gui", "crates/lltdb", "crates/lltdata"]
 # Android 的 cdylib 入口是独立包（各自一份 Cargo.lock，只在交叉编译时构建），
 # 不参与工作区的 build/test，桌面构建仍然只产出两个可执行文件。
 exclude = ["android"]
@@ -11,6 +11,7 @@ edition = "2024"
 
 [workspace.dependencies]
 lltdb = { path = "crates/lltdb" }
+lltdata = { path = "crates/lltdata" }
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 csv = "1.4.0"

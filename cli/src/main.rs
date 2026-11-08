@@ -7,23 +7,11 @@
 //!
 //! 格式说明见 `docs/llt-format-reverse-engineering.md` 与 `out/timetable/README.md`。
 
-mod archive;
 mod build;
 mod check;
 mod cli;
-mod dbpath;
-mod decode;
-mod download;
-mod duty;
-mod export;
-mod extras;
-mod format;
 mod query;
-mod routes;
-mod samecity;
-mod spdata;
 mod table;
-mod update;
 
 use clap::{CommandFactory, Parser};
 
