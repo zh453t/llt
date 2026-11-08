@@ -42,6 +42,8 @@ struct Ctx {
     filter_by_date: bool,
     limit: Option<usize>,
     json: bool,
+    /// 开行周期表：`rule_index -> (period, mask)`，与界面同一份判定。
+    rules: std::collections::HashMap<i64, (i64, i64)>,
 }
 
 impl Ctx {
@@ -50,14 +52,25 @@ impl Ctx {
             Some(text) => parse_date(text).map_err(anyhow::Error::msg)?,
             None => today(),
         };
+        let db = open_db(opts.base.db.as_deref(), opts.base.strict, opts.base.quiet)?;
+        let rules = db.all_rules();
         Ok(Self {
-            db: open_db(opts.base.db.as_deref(), opts.base.strict, opts.base.quiet)?,
+            db,
+            rules,
             date,
             ymd: ymd(date),
             filter_by_date: !opts.all,
             limit: (opts.limit > 0).then_some(opts.limit),
             json: opts.base.json,
         })
+    }
+
+    /// 某一天这趟车开不开行：区间内还要过开行周期那一关（与界面一致）。
+    fn running(&self, date: i64, from: i64, to: i64, rule_index: Option<i64>) -> bool {
+        let (period, mask) = rule_index
+            .and_then(|index| self.rules.get(&index).copied())
+            .unwrap_or((1, 0));
+        lltdb::date::run_state(from, to, date, period, mask) == lltdb::date::RunState::Running
     }
 
     fn date_label(&self) -> String {
@@ -89,7 +102,7 @@ fn train(args: &TrainArgs) -> Result<()> {
     let code = args.code.trim();
     let mut rows = select_trains(&ctx.db, code, args.prefix)?;
     if ctx.filter_by_date {
-        rows.retain(|train| train.runs_on(ctx.ymd));
+        rows.retain(|train| ctx.running(ctx.ymd, train.date_from, train.date_to, train.rule_index));
     }
     let total = rows.len();
     let shown = truncate(&mut rows, ctx.limit);
@@ -115,7 +128,14 @@ fn train(args: &TrainArgs) -> Result<()> {
     }
 
     if total == 0 {
-        eprintln!("车次「{code}」：{}，没有匹配结果", ctx.scope());
+        // 车次存在但当天没排上，多半是开行周期（隔日开行等）的停开日，说清楚点。
+        let reason = if ctx.filter_by_date && !select_trains(&ctx.db, code, args.prefix)?.is_empty()
+        {
+            format!("{} 停开（按开行计划这天不开行）", ctx.date_label())
+        } else {
+            ctx.scope()
+        };
+        eprintln!("车次「{code}」：{reason}，没有匹配结果");
         return Ok(());
     }
 
@@ -215,7 +235,14 @@ fn station(args: &StationArgs) -> Result<()> {
     let name = resolve_station(&ctx.db, &args.name)?;
     let mut rows = ctx.db.station_board(&name).map_err(anyhow::Error::msg)?;
     if ctx.filter_by_date {
-        rows.retain(|stop| stop.runs_on(origin_ymd(ctx.date, stop.day)));
+        rows.retain(|stop| {
+            ctx.running(
+                origin_ymd(ctx.date, stop.day),
+                stop.date_from,
+                stop.date_to,
+                stop.rule_index,
+            )
+        });
     }
     let total = rows.len();
     let shown = truncate(&mut rows, ctx.limit);
@@ -287,7 +314,14 @@ fn od(args: &OdArgs) -> Result<()> {
         eprintln!("注意：{from} → {to} 的候选超过 {OD_FETCH_LIMIT} 条，结果可能不完整");
     }
     if ctx.filter_by_date {
-        rows.retain(|hit| hit.runs_on(origin_ymd(ctx.date, hit.depart_day)));
+        rows.retain(|hit| {
+            ctx.running(
+                origin_ymd(ctx.date, hit.depart_day),
+                hit.date_from,
+                hit.date_to,
+                hit.rule_index,
+            )
+        });
     }
     let total = rows.len();
     let shown = truncate(&mut rows, ctx.limit);

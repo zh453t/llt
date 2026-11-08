@@ -29,6 +29,11 @@ pub struct Train {
     pub kind: String,
     pub date_from: u32,
     pub date_to: u32,
+    /// `t.rule` 的行号（0 起）：开行周期的「周期 + 掩码」。
+    ///
+    /// `(rule_index, date_from)` 两个数就能推出每一天开不开行，见
+    /// `docs/llt-format-reverse-engineering.md` §12。
+    pub rule_index: u32,
     pub stops: Vec<Stop>,
 }
 
@@ -186,6 +191,7 @@ fn parse_train_shard(bytes: &[u8], stations: &[String], codes: &[String]) -> Res
             code,
             date_from: b128(header, 3, 4),
             date_to: b128(header, 7, 4),
+            rule_index: b255(header, 11),
             stops: build_stops(raw),
         });
         offset = cursor;

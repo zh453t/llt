@@ -164,6 +164,13 @@ pub struct LltApp {
     db_error: Option<String>,
     /// 数据库里记录的数据包版本（`20261108`），供标题栏显示数据日期。
     data_version: Option<i64>,
+    /// 开行周期表：`rule_index -> (period, mask)`，打开数据库时一次读全。
+    rules: std::collections::HashMap<i64, (i64, i64)>,
+    /// 详情里开行计划日历正在看的月份（`yyyymm`），换车次时按查询日期重置。
+    plan_month: i64,
+    /// 桌面端的开行计划弹窗是否打开，以及打开时的窗口尺寸（变了就关）。
+    plan_page_open: bool,
+    plan_page_size: Option<egui::Vec2>,
 
     tab: Tab,
     /// 深浅色偏好（`ThemeChoice`），改了就落盘。
@@ -315,6 +322,10 @@ impl LltApp {
             train_back: None,
             error: None,
             window_fitted: false,
+            rules: std::collections::HashMap::new(),
+            plan_month: 0,
+            plan_page_open: false,
+            plan_page_size: None,
             platform,
             safe_area: crate::ScreenInsets::default(),
             inset_probe_at: None,
@@ -337,6 +348,17 @@ impl LltApp {
         app
     }
 
+    /// 某一天这趟车开不开行：区间内还要过开行周期那一关。
+    ///
+    /// 口径与 `docs/llt-format-reverse-engineering.md` §12 一致；`rule_index` 查不到
+    /// （老库没有 `train_rules`）时退回「区间内天天开行」。
+    fn running(&self, date: i64, from: i64, to: i64, rule_index: Option<i64>) -> bool {
+        let (period, mask) = rule_index
+            .and_then(|index| self.rules.get(&index).copied())
+            .unwrap_or((1, 0));
+        lltdb::date::run_state(from, to, date, period, mask) == lltdb::date::RunState::Running
+    }
+
     fn open_db(&mut self) {
         self.db = None;
         self.data_version = None;
@@ -345,12 +367,34 @@ impl LltApp {
         match Db::open(&self.db_path) {
             Ok(db) => {
                 self.data_version = db.data_version();
+                // 开行周期表很小（131 行），一次读全，界面按 rule_index 取。
+                self.rules = db.all_rules();
                 self.db = Some(db);
                 // 配置里恢复出来的查询词要立刻查一次，否则页面上只有输入、没有结果。
                 // `open_db` 也是错误页「重试」的入口，所以恢复逻辑放在这里而非 new()。
                 self.refresh_restored_queries();
+                self.demo_preselect();
             }
             Err(err) => self.db_error = Some(err),
+        }
+    }
+
+    /// 调试用：`LLT_DEMO_TRAIN=G531` 时启动直接查这趟车并打开详情。
+    ///
+    /// 截图验证详情页（尤其开行计划日历）时省掉「点行」这一步——自动化点击
+    /// 在不同窗口尺寸下很容易打偏，而这里走的是同一条 `select_train` 路径。
+    fn demo_preselect(&mut self) {
+        let Ok(code) = std::env::var("LLT_DEMO_TRAIN") else {
+            return;
+        };
+        if code.trim().is_empty() || self.db.is_none() {
+            return;
+        }
+        self.tab = Tab::Train;
+        self.train_query = code;
+        self.refresh_train_search();
+        if let Some(first) = self.train_results.first().map(|train| train.index) {
+            self.select_train(first);
         }
     }
 
@@ -752,6 +796,10 @@ impl LltApp {
     }
 
     fn select_train(&mut self, index: i64) {
+        // 换车次时把日历拨回查询日期那一月，顺手关掉弹窗。
+        self.plan_month = 0;
+        self.plan_page_open = false;
+        self.plan_page_size = None;
         if let Some(detail) = &self.detail {
             if detail.summary.index == index {
                 self.selected = Some(index);
@@ -1028,10 +1076,15 @@ impl LltApp {
         }
 
         let selected_ymd = ymd(self.dates.train);
-        let (running, not_running): (Vec<&TrainSummary>, Vec<&TrainSummary>) = self
-            .train_results
-            .iter()
-            .partition(|train| train.runs_on(selected_ymd));
+        let (running, not_running): (Vec<&TrainSummary>, Vec<&TrainSummary>) =
+            self.train_results.iter().partition(|train| {
+                self.running(
+                    selected_ymd,
+                    train.date_from,
+                    train.date_to,
+                    train.rule_index,
+                )
+            });
         let rows: Vec<&TrainSummary> = running.iter().chain(not_running.iter()).copied().collect();
         let running_count = running.len();
         if !bar {
@@ -1356,10 +1409,15 @@ impl LltApp {
         }
 
         let date = self.dates.get(self.tab);
-        let (running, not_running): (Vec<&StationStop>, Vec<&StationStop>) = self
-            .station_board
-            .iter()
-            .partition(|stop| stop.runs_on(origin_ymd(date, stop.day)));
+        let (running, not_running): (Vec<&StationStop>, Vec<&StationStop>) =
+            self.station_board.iter().partition(|stop| {
+                self.running(
+                    origin_ymd(date, stop.day),
+                    stop.date_from,
+                    stop.date_to,
+                    stop.rule_index,
+                )
+            });
         let rows: Vec<&StationStop> = running.iter().chain(not_running.iter()).copied().collect();
         let running_count = running.len();
         if !bar {
@@ -1762,10 +1820,15 @@ impl LltApp {
         }
 
         let date = self.dates.get(self.tab);
-        let (running, not_running): (Vec<&OdResult>, Vec<&OdResult>) = filtered
-            .iter()
-            .copied()
-            .partition(|hit| hit.runs_on(origin_ymd(date, hit.depart_day)));
+        let (running, not_running): (Vec<&OdResult>, Vec<&OdResult>) =
+            filtered.iter().copied().partition(|hit| {
+                self.running(
+                    origin_ymd(date, hit.depart_day),
+                    hit.date_from,
+                    hit.date_to,
+                    hit.rule_index,
+                )
+            });
         let rows: Vec<&OdResult> = running.iter().chain(not_running.iter()).copied().collect();
         let running_count = running.len();
         if !self.bottom_bar() {
@@ -2068,6 +2131,9 @@ impl LltApp {
         let previous = self.train_back.clone();
         let mut stations_only = self.via_stations_only;
         let mut via_page_open = self.via_page_open;
+        // 桌面端的开行计划弹窗：和经由一样，点入口才开。
+        let mut plan_page_open = self.plan_page_open;
+        let mut plan_page_size = self.plan_page_size;
         // 模态窗按「去掉系统栏」的尺寸排版，否则整页会画到状态栏下面。
         let screen = self.safe_screen(ui.ctx());
         if via_page_open && self.via_page_size != Some(screen) {
@@ -2075,6 +2141,12 @@ impl LltApp {
         }
         let extras = &self.extras;
         let date = ymd(self.dates.get(self.tab));
+        // 开行计划日历：周期表只读、月份要写回界面状态（两处是不同的字段）。
+        let mut plan = RunPlan {
+            rules: &self.rules,
+            month: &mut self.plan_month,
+            open: &mut plan_page_open,
+        };
         let open = format!(
             "开行 {}",
             date_window(detail.summary.date_from, detail.summary.date_to)
@@ -2124,7 +2196,15 @@ impl LltApp {
                         },
                     );
                     ui.add_space(theme::GAP_M);
-                    extras_ui(ui, &detail.summary, extras, &detail.stops, date, &mut link);
+                    extras_ui(
+                        ui,
+                        &detail.summary,
+                        extras,
+                        &detail.stops,
+                        date,
+                        &mut link,
+                        &mut plan,
+                    );
                 });
         } else if compact {
             let height = ui.available_height();
@@ -2155,6 +2235,7 @@ impl LltApp {
                                     &detail.stops,
                                     date,
                                     &mut link,
+                                    &mut plan,
                                 );
                             });
                     },
@@ -2204,7 +2285,15 @@ impl LltApp {
             ui.add_space(theme::GAP_S);
             ui.separator();
             ui.add_space(theme::GAP_S);
-            extras_ui(ui, &detail.summary, extras, &detail.stops, date, &mut link);
+            extras_ui(
+                ui,
+                &detail.summary,
+                extras,
+                &detail.stops,
+                date,
+                &mut link,
+                &mut plan,
+            );
             ui.add_space(theme::GAP_S);
             ui.separator();
             ui.add_space(theme::GAP_S);
@@ -2248,6 +2337,22 @@ impl LltApp {
                 screen,
             );
         }
+        if plan_page_open {
+            // 刚打开时记下尺寸；窗口一变就关页，避免弹窗位置与大小错位。
+            if plan_page_size.is_none() {
+                plan_page_size = Some(screen);
+            }
+            run_plan_page_ui(
+                ui,
+                &detail.summary,
+                &self.rules,
+                &mut self.plan_month,
+                &mut plan_page_open,
+                screen,
+            );
+        }
+        self.plan_page_open = plan_page_open;
+        self.plan_page_size = if plan_page_open { plan_page_size } else { None };
         if header.close {
             close = true;
         }
@@ -2742,14 +2847,15 @@ impl LltApp {
         let selected = ymd(self.dates.get(self.tab));
         match self.tab {
             Tab::Train => self.train_results.iter().fold((0, 0), |(on, off), train| {
-                if train.runs_on(selected) {
+                if self.running(selected, train.date_from, train.date_to, train.rule_index) {
                     (on + 1, off)
                 } else {
                     (on, off + 1)
                 }
             }),
             Tab::Station => self.station_board.iter().fold((0, 0), |(on, off), stop| {
-                if stop.runs_on(origin_ymd(self.dates.get(self.tab), stop.day)) {
+                let day = origin_ymd(self.dates.get(self.tab), stop.day);
+                if self.running(day, stop.date_from, stop.date_to, stop.rule_index) {
                     (on + 1, off)
                 } else {
                     (on, off + 1)
@@ -2760,7 +2866,8 @@ impl LltApp {
                 .iter()
                 .filter(|hit| self.od_filtered(hit))
                 .fold((0, 0), |(on, off), hit| {
-                    if hit.runs_on(origin_ymd(self.dates.get(self.tab), hit.depart_day)) {
+                    let day = origin_ymd(self.dates.get(self.tab), hit.depart_day);
+                    if self.running(day, hit.date_from, hit.date_to, hit.rule_index) {
                         (on + 1, off)
                     } else {
                         (on, off + 1)
@@ -3651,6 +3758,18 @@ fn via_header_ui(ui: &mut Ui, id: egui::Id, summary: String) -> bool {
 }
 
 /// 交路 / 车型 / 餐车等信息行；经由由调用方在下方单独绘制。
+/// 开行计划日历要用的两样东西：周期表与正在看的月份。
+///
+/// 拆成结构体是因为 `extras_ui` 的参数已经到极限，而这两项又必须可变
+/// （翻月要写回界面状态）。
+struct RunPlan<'a> {
+    rules: &'a std::collections::HashMap<i64, (i64, i64)>,
+    /// `yyyymm`。
+    month: &'a mut i64,
+    /// 桌面端点「开行计划」入口后置真，由详情页画弹窗。
+    open: &'a mut bool,
+}
+
 fn extras_ui(
     ui: &mut Ui,
     train: &TrainSummary,
@@ -3658,6 +3777,7 @@ fn extras_ui(
     stops: &[Stop],
     date: i64,
     link: &mut Option<DetailLink>,
+    plan: &mut RunPlan<'_>,
 ) {
     let (duties, dining, matched) = extras.for_date(date);
     ui.spacing_mut().item_spacing.y = 6.0;
@@ -3745,6 +3865,305 @@ fn extras_ui(
             );
         });
     }
+
+    ui.add_space(theme::GAP_S);
+    // 桌面默认收起：2016 年那种月历摆在侧栏里会把停站表挤掉两三行，
+    // 与经由一样只留一行入口，点开在弹窗里看。手机整页反过来——那里本来就
+    // 是滚动的一页，日历内嵌最省事，不用再开一层。
+    if theme::pointer() == theme::Pointer::Touch {
+        run_plan_ui(ui, train, plan, true);
+    } else if run_plan_entry(ui, train) {
+        *plan.open = true;
+    }
+}
+
+/// 桌面端的开行计划弹窗：封顶 340×70% 的居中窗口，内容与手机端内嵌的日历一致。
+fn run_plan_page_ui(
+    ui: &mut Ui,
+    train: &TrainSummary,
+    rules: &std::collections::HashMap<i64, (i64, i64)>,
+    month: &mut i64,
+    open: &mut bool,
+    screen: egui::Vec2,
+) {
+    // 只约束宽度：日历是定高的，高度交给内容，免得弹窗下面拖一大片空白。
+    let width = (screen.x - 24.0).min(340.0);
+    let frame = egui::Frame::new()
+        .fill(ui.visuals().panel_fill)
+        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(12);
+    let mut plan = RunPlan {
+        rules,
+        month,
+        open: &mut false,
+    };
+    let mut close = false;
+    let _ = egui::Modal::new(egui::Id::unique("llt-run-plan-page"))
+        .frame(frame)
+        .backdrop_color(egui::Color32::from_black_alpha(120))
+        .show(ui.ctx(), |ui| {
+            ui.set_min_width(width - 24.0);
+            ui.horizontal(|ui| {
+                ui.label(bold("开行计划").size(theme::FONT_SECTION));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.add(egui::Button::new(meta("关闭"))).clicked() {
+                        close = true;
+                    }
+                });
+            });
+            ui.add_space(theme::GAP_S);
+            run_plan_ui(ui, train, &mut plan, false);
+        });
+    // 与详情整页同一个理由：打开它的那一下点击还没结束，模态背景层会当成
+    // 「点了外面」，于是弹窗刚开就被关。这里只认自己的「关闭」按钮。
+    if close {
+        *open = false;
+    }
+}
+
+/// 桌面端的「开行计划」入口行，样式与经由入口一致。
+fn run_plan_entry(ui: &mut Ui, train: &TrainSummary) -> bool {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), theme::control_height()),
+        Sense::hover(),
+    );
+    let hovered = ui.rect_contains_pointer(rect);
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(4),
+            ui.visuals().widgets.hovered.weak_bg_fill,
+        );
+    }
+    ui.painter().hline(
+        rect.x_range(),
+        rect.top(),
+        egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+    );
+    let summary = format!(
+        "{} · {}",
+        date_window(train.date_from, train.date_to),
+        "月历"
+    );
+    let weak = ui.visuals().weak_text_color();
+    let mut row = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    row.add_space(theme::GAP_S);
+    row.label(bold("开行计划").size(theme::FONT_BODY));
+    row.add_space(theme::GAP_S);
+    row.add(egui::Label::new(meta(summary.clone()).weak()).truncate())
+        .on_hover_text(summary);
+    row.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        collapse_arrow(ui, false, weak);
+        ui.add_space(theme::GAP_XS);
+        ui.label(meta("查看").weak());
+        ui.add_space(theme::GAP_S);
+    });
+    drop(row);
+
+    let response = ui.interact(
+        rect,
+        ui.make_persistent_id("llt-run-plan-trigger"),
+        Sense::click(),
+    );
+    let clicked = response.clicked();
+    response.on_hover_text("按日历看这趟车每天开不开行");
+    clicked
+}
+
+/// 开行计划日历：一天一格，可翻月。
+///
+/// 数据完全来自本地：`date_from`/`date_to` 两个日期 + `t.rule` 里的一行
+/// 「周期 / 掩码」（见 `docs/llt-format-reverse-engineering.md` §12）。
+/// 用 egui 自己的绘图与 jiff 的日期运算，不引第三方日历控件。
+fn run_plan_ui(ui: &mut Ui, train: &TrainSummary, plan: &mut RunPlan<'_>, with_title: bool) {
+    let (period, mask) = train
+        .rule_index
+        .and_then(|index| plan.rules.get(&index).copied())
+        .unwrap_or((1, 0));
+    let this_month = ymd(today()) / 100;
+    if *plan.month <= 0 {
+        *plan.month = this_month;
+    }
+
+    ui.horizontal(|ui| {
+        // 弹窗自己有标题，这里只留区间与翻月。
+        if with_title {
+            ui.label(bold("开行计划").size(theme::FONT_BODY));
+            ui.add_space(theme::GAP_S);
+        }
+        ui.label(meta(date_window(train.date_from, train.date_to)).weak());
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = theme::GAP_XS;
+            if ui
+                .add(egui::Button::new(meta("›")).min_size(egui::vec2(26.0, 24.0)))
+                .on_hover_text("下一个月")
+                .clicked()
+            {
+                *plan.month = shift_month(*plan.month, 1);
+            }
+            ui.label(meta(month_label(*plan.month)));
+            if ui
+                .add(egui::Button::new(meta("‹")).min_size(egui::vec2(26.0, 24.0)))
+                .on_hover_text("上一个月")
+                .clicked()
+            {
+                *plan.month = shift_month(*plan.month, -1);
+            }
+        });
+    });
+
+    let year = (*plan.month / 100) as i16;
+    let month = (*plan.month % 100) as i8;
+    let Ok(first) = jiff::civil::Date::new(year, month, 1) else {
+        return;
+    };
+    let days = i64::from(first.days_in_month());
+    // 周一为第一列，与「工作日/周末」的直觉一致。
+    let lead = i64::from(first.weekday().to_monday_zero_offset());
+    let today_ymd = ymd(today());
+
+    let cell = theme::plan_cell();
+    let visuals = ui.visuals().clone();
+    let running_fg = visuals.hyperlink_color;
+    let running_bg = visuals.selection.bg_fill;
+    let weak_fg = visuals.weak_text_color();
+    let dim_fg = weak_fg.gamma_multiply(0.55);
+    let font = egui::FontId::proportional(theme::FONT_META);
+
+    ui.add_space(theme::GAP_XS);
+    ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
+    // 星期表头：只写一个字，和格子同宽，对齐天然成立。
+    ui.horizontal(|ui| {
+        for name in ["一", "二", "三", "四", "五", "六", "日"] {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(cell, cell * 0.7), Sense::hover());
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                name,
+                font.clone(),
+                weak_fg,
+            );
+        }
+    });
+    let weeks = (lead + days + 6) / 7;
+    for week in 0..weeks {
+        ui.horizontal(|ui| {
+            for weekday in 0..7 {
+                let index = week * 7 + weekday - lead;
+                if !(0..days).contains(&index) {
+                    // 月首、月末的空格：占位保持列对齐。
+                    ui.allocate_exact_size(egui::vec2(cell, cell), Sense::hover());
+                    continue;
+                }
+                let day = index + 1;
+                let date = year as i64 * 10_000 + month as i64 * 100 + day;
+                let state =
+                    lltdb::date::run_state(train.date_from, train.date_to, date, period, mask);
+                let (rect, response) =
+                    ui.allocate_exact_size(egui::vec2(cell, cell), Sense::hover());
+                let painter = ui.painter();
+                let running = state == lltdb::date::RunState::Running;
+                if running {
+                    painter.rect_filled(rect.shrink(1.0), 5.0, running_bg);
+                }
+                let color = if running {
+                    running_fg
+                } else if state == lltdb::date::RunState::Stopped {
+                    // 规则停开：和「区间外」区分开，画一条斜杠。
+                    painter.line_segment(
+                        [
+                            egui::pos2(rect.left() + 5.0, rect.bottom() - 5.0),
+                            egui::pos2(rect.right() - 5.0, rect.top() + 5.0),
+                        ],
+                        egui::Stroke::new(1.0, dim_fg),
+                    );
+                    weak_fg
+                } else {
+                    dim_fg
+                };
+                painter.text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    day.to_string(),
+                    font.clone(),
+                    color,
+                );
+                if date == today_ymd {
+                    painter.rect_stroke(
+                        rect.shrink(1.0),
+                        5.0,
+                        egui::Stroke::new(1.0, running_fg),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                response.on_hover_text(format!("{} · {}", date_ymd(date), state.label()));
+            }
+        });
+    }
+
+    ui.add_space(theme::GAP_XS);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = theme::GAP_XS;
+        legend_swatch(ui, SwatchKind::Filled, running_bg, running_fg, "开行");
+        legend_swatch(ui, SwatchKind::Struck, weak_fg, weak_fg, "规则停开");
+        legend_swatch(ui, SwatchKind::Plain, dim_fg, dim_fg, "区间外 / 已过期");
+    });
+}
+
+/// 图例小方块的三种画法，与格子里的表现一一对应。
+enum SwatchKind {
+    /// 开行：实心块。
+    Filled,
+    /// 规则停开：一条斜杠。
+    Struck,
+    /// 区间外 / 已过期：只描边。
+    Plain,
+}
+
+fn legend_swatch(ui: &mut Ui, kind: SwatchKind, fill: Color32, color: Color32, text: &str) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(11.0, 11.0), Sense::hover());
+    let painter = ui.painter();
+    match kind {
+        SwatchKind::Filled => {
+            painter.rect_filled(rect, 3.0, fill);
+        }
+        SwatchKind::Struck => {
+            painter.line_segment(
+                [
+                    egui::pos2(rect.left() + 1.0, rect.bottom() - 1.0),
+                    egui::pos2(rect.right() - 1.0, rect.top() + 1.0),
+                ],
+                egui::Stroke::new(1.5, color),
+            );
+        }
+        SwatchKind::Plain => {
+            painter.rect_stroke(
+                rect,
+                3.0,
+                egui::Stroke::new(1.0, color),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+    ui.label(meta(text).color(color));
+}
+
+/// `yyyymm` 前后挪若干个月。
+fn shift_month(month: i64, delta: i64) -> i64 {
+    let year = month / 100;
+    let index = year * 12 + (month % 100) - 1 + delta;
+    index.div_euclid(12) * 100 + index.rem_euclid(12) + 1
+}
+
+/// `yyyymm` -> `2026 年 11 月`。
+fn month_label(month: i64) -> String {
+    format!("{} 年 {} 月", month / 100, month % 100)
 }
 
 /// 详情里由界面回写的两个开关，集中传递，避免参数继续膨胀。
@@ -4186,7 +4605,48 @@ mod tests {
             days: 1,
             date_from,
             date_to,
+            rule_index: None,
         }
+    }
+
+    #[test]
+    fn run_state_honours_period() {
+        // 周期 7 天、掩码 0b1111：前四天开行，后三天停开。
+        let on = lltdb::date::RunState::Running;
+        let off = lltdb::date::RunState::Stopped;
+        assert_eq!(
+            lltdb::date::run_state(20261101, 20261130, 20261101, 7, 15),
+            on
+        );
+        assert_eq!(
+            lltdb::date::run_state(20261101, 20261130, 20261104, 7, 15),
+            on
+        );
+        assert_eq!(
+            lltdb::date::run_state(20261101, 20261130, 20261105, 7, 15),
+            off
+        );
+        assert_eq!(
+            lltdb::date::run_state(20261101, 20261130, 20261108, 7, 15),
+            on
+        );
+        // 查询日期跨过区间两端。
+        assert_eq!(
+            lltdb::date::run_state(20261101, 20261130, 20261031, 7, 15),
+            lltdb::date::RunState::NotYet
+        );
+        assert_eq!(
+            lltdb::date::run_state(20261101, 20261130, 20261201, 7, 15),
+            lltdb::date::RunState::Expired
+        );
+    }
+
+    #[test]
+    fn month_shifts_across_year() {
+        assert_eq!(shift_month(202612, 1), 202701);
+        assert_eq!(shift_month(202601, -1), 202512);
+        assert_eq!(shift_month(202611, 0), 202611);
+        assert_eq!(shift_month(202601, 12), 202701);
     }
 
     #[test]

@@ -25,6 +25,74 @@ pub fn origin_ymd(date: Date, day: i64) -> i64 {
     }
 }
 
+/// 某一天对这趟车意味着什么（详情页日历的配色就靠它）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunState {
+    /// 开行。
+    Running,
+    /// 开行区间还没开始。
+    NotYet,
+    /// 开行区间已经结束。
+    Expired,
+    /// 区间内，但按开行周期这天停开（例如隔日开行的另一天）。
+    Stopped,
+}
+
+impl RunState {
+    /// 中文短标签，界面与 CLI 共用。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Running => "开行",
+            Self::NotYet => "未开行",
+            Self::Expired => "已过期",
+            Self::Stopped => "规则停开",
+        }
+    }
+}
+
+/// 一天开不开行。
+///
+/// `period` 天一轮、`mask` 的第 `k` 位为 1 表示第 `k` 天开行；`period <= 1` 或
+/// `mask` 为 0（老数据没有 `t.rule`）时按「区间内天天开行」算。判定顺序与
+/// `docs/llt-format-reverse-engineering.md` §12 一致：先看区间，再看周期。
+pub fn run_state(date_from: i64, date_to: i64, date: i64, period: i64, mask: i64) -> RunState {
+    if date < date_from {
+        return RunState::NotYet;
+    }
+    if date > date_to {
+        return RunState::Expired;
+    }
+    let period = period.max(1);
+    if period > 1 && mask != 0 {
+        let offset = days_between(date_from, date) % period;
+        if mask & (1 << offset) == 0 {
+            return RunState::Stopped;
+        }
+    }
+    RunState::Running
+}
+
+/// 两个 `YYYYMMDD` 之间的天数差（`to - from`）。
+pub fn days_between(from: i64, to: i64) -> i64 {
+    match (to_date(from), to_date(to)) {
+        // 两端都是午夜，直接按天数差算，不牵扯时区。
+        (Some(from), Some(to)) => to.duration_since(from).as_secs() / 86_400,
+        _ => 0,
+    }
+}
+
+fn to_date(value: i64) -> Option<Date> {
+    if value < 10_000_000 {
+        return None;
+    }
+    Date::new(
+        (value / 10_000) as i16,
+        ((value / 100) % 100) as i8,
+        (value % 100) as i8,
+    )
+    .ok()
+}
+
 /// `YYYYMMDD` -> `2026-11-08`；无效时返回空串。
 pub fn date_ymd(value: i64) -> String {
     if value < 10_000_000 {
@@ -141,6 +209,43 @@ mod tests {
         assert!(parse_date("2026-13-01").is_err());
         assert!(parse_date("2026/11/08").is_err());
         assert!(parse_date("").is_err());
+    }
+
+    #[test]
+    fn run_state_follows_period_and_range() {
+        // G531：ruleIndex=89 -> t.rule=(7, 0b1111)，隔日之外的「周一周二」停开。
+        let from = 20261001;
+        let to = 20261124;
+        // 区间外。
+        assert_eq!(run_state(from, to, 20260930, 7, 0b1111), RunState::NotYet);
+        assert_eq!(run_state(from, to, 20261125, 7, 0b1111), RunState::Expired);
+        // 区间内按 period 取模：第 0/1/2/3 天开行，第 4/5/6 天停开。
+        for (offset, expected) in [
+            (0, RunState::Running),
+            (1, RunState::Running),
+            (2, RunState::Running),
+            (3, RunState::Running),
+            (4, RunState::Stopped),
+            (5, RunState::Stopped),
+            (6, RunState::Stopped),
+            (7, RunState::Running),
+        ] {
+            let date = add_days(from, offset);
+            assert_eq!(
+                run_state(from, to, date, 7, 0b1111),
+                expected,
+                "offset={offset}"
+            );
+        }
+        // period=1 或没有规则表时，区间内天天开行。
+        assert_eq!(run_state(from, to, from + 1, 1, 0), RunState::Running);
+        assert_eq!(run_state(from, to, from + 1, 7, 0), RunState::Running);
+    }
+
+    fn add_days(from: i64, days: i64) -> i64 {
+        let date = to_date(from).unwrap();
+        let shifted = date.checked_add(jiff::Span::new().days(days)).unwrap();
+        ymd(shifted)
     }
 
     #[test]

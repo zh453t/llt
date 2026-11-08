@@ -253,6 +253,11 @@ RunChartTopLayout / RunChartView（5×7 日历渲染，同时用于列表「当�
 
 复刻工具：`python tools/runchart.py G531 20261101 20261120`（打印逐日开/停）。
 
+落到 SQLite 里是两处：`trains.rule_index`（车次头 [11..12] 的 base255）与
+`train_rules(rule_index, period, mask)`（`t.rule` 的 131 行）。判定实现在
+`lltdb::date::run_state`：GUI 的月历、列表的「当日开行」圆点、CLI 的 `--date` 过滤
+都调它，口径只有一份。
+
 ### sp.dat：为什么需要「车次内部编号」
 
 `T{N}.dat` 里只有车次号（`K54`），而 12306 的接口用内部编号 `train_no`（如 `K54 → 1200000K540D`）。

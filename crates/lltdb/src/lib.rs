@@ -23,8 +23,11 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params, params_from_iter};
 
+/// 车次行的列。老库（`tools/decode_llt.py` 或旧版 `llt build`）没有 `rule_index` 列，
+/// 那时用下面那份清单，`map_train` 读到的就是 NULL。
 const TRAIN_COLUMNS: &str = "train_index, train, type, first_station, last_station, \
-                             total_km, days, date_from, date_to";
+                             total_km, days, date_from, date_to, rule_index";
+const TRAIN_COLUMNS_LEGACY: &str = "train_index, train, type, first_station, last_station, \n                                    total_km, days, date_from, date_to, NULL";
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DbStats {
@@ -58,6 +61,8 @@ pub struct TrainSummary {
     pub days: i64,
     pub date_from: i64,
     pub date_to: i64,
+    /// `train_rules` 的行号；老数据没有这一列时是 `None`。
+    pub rule_index: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +100,8 @@ pub struct StationStop {
     pub km: i64,
     pub date_from: i64,
     pub date_to: i64,
+    /// `train_rules` 的行号；老数据没有这一列时是 `None`。
+    pub rule_index: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -118,6 +125,8 @@ pub struct OdResult {
     pub to_station: String,
     pub date_from: i64,
     pub date_to: i64,
+    /// `train_rules` 的行号；老数据没有这一列时是 `None`。
+    pub rule_index: Option<i64>,
 }
 
 impl TrainSummary {
@@ -157,6 +166,8 @@ impl OdResult {
 
 pub struct Db {
     conn: Connection,
+    /// 车次列清单：老库没有 `rule_index` 列时换成 `NULL` 占位。
+    train_columns: &'static str,
 }
 
 impl Db {
@@ -186,7 +197,19 @@ impl Db {
         conn.prepare_cached("SELECT count(*) FROM stops")
             .map_err(|e| format!("数据库不兼容：{e}"))?;
 
-        Ok(Self { conn })
+        // 老库没有 rule_index 列：查一次 PRAGMA 决定用哪份列清单。
+        let has_rule = conn
+            .prepare("SELECT rule_index FROM trains LIMIT 1")
+            .is_ok();
+        let train_columns = if has_rule {
+            TRAIN_COLUMNS
+        } else {
+            TRAIN_COLUMNS_LEGACY
+        };
+        Ok(Self {
+            conn,
+            train_columns,
+        })
     }
 
     pub fn stats(&self) -> rusqlite::Result<DbStats> {
@@ -257,13 +280,14 @@ impl Db {
         let slash_segment = format!("%/{query}%");
 
         let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {TRAIN_COLUMNS} FROM trains
+            "SELECT {} FROM trains
              WHERE train LIKE ?1 OR train LIKE ?2 OR train_no LIKE ?1
              ORDER BY (train = ?3) DESC,
                       (train LIKE ?1) DESC,
                       (train_no = ?3) DESC,
                       length(train), train
-             LIMIT ?4"
+             LIMIT ?4",
+            self.train_columns
         ))?;
 
         let rows = stmt.query_map(params![prefix, slash_segment, query, limit], map_train)?;
@@ -332,7 +356,8 @@ impl Db {
             .join(",");
         let sql = format!(
             "SELECT s.station, t.train_index, t.train, t.type, t.first_station, t.last_station,
-                    s.arrive, s.depart, s.dwell_min, s.day, s.km, t.date_from, t.date_to
+                    s.arrive, s.depart, s.dwell_min, s.day, s.km, t.date_from, t.date_to,
+                    t.rule_index
              FROM stops s
              JOIN trains t ON t.train_index = s.train_index
              WHERE s.station_index IN ({placeholders})
@@ -354,6 +379,7 @@ impl Db {
                 km: int(row, 10)?,
                 date_from: int(row, 11)?,
                 date_to: int(row, 12)?,
+                rule_index: row.get::<_, Option<i64>>(13)?,
             })
         })?;
         rows.collect()
@@ -398,7 +424,7 @@ impl Db {
                     s1.depart, s1.depart_min, s1.day, s1.km,
                     s2.arrive, s2.arrive_min, s2.day, s2.km,
                     s1.station, s2.station,
-                    t.date_from, t.date_to
+                    t.date_from, t.date_to, t.rule_index
              FROM stops s1
              JOIN stops s2 ON s2.train_index = s1.train_index AND s2.seq > s1.seq
              JOIN trains t ON t.train_index = s1.train_index
@@ -432,6 +458,7 @@ impl Db {
                 to_station: text(row, 14)?,
                 date_from: int(row, 15)?,
                 date_to: int(row, 16)?,
+                rule_index: row.get::<_, Option<i64>>(17)?,
             });
         }
 
@@ -441,9 +468,69 @@ impl Db {
     }
 
     /// 车次详情（含全部停站）。
+    /// 整张开行周期表：`rule_index -> (period, mask)`。
+    ///
+    /// 车站 / 站站查询的每一行都要判「当日开行」，逐行查库太浪费；这里一次读全
+    /// （131 行，几 KB），界面自己按 `rule_index` 取。
+    pub fn all_rules(&self) -> std::collections::HashMap<i64, (i64, i64)> {
+        let mut out = std::collections::HashMap::new();
+        let Ok(mut stmt) = self
+            .conn
+            .prepare("SELECT rule_index, period, mask FROM train_rules")
+        else {
+            // 老库没有这张表：返回空表，界面退回「区间内天天开行」。
+            return out;
+        };
+        let Ok(rows) = stmt.query_map([], |row| Ok((int(row, 0)?, (int(row, 1)?, int(row, 2)?))))
+        else {
+            return out;
+        };
+        for row in rows.flatten() {
+            out.insert(row.0, row.1);
+        }
+        out
+    }
+
+    /// 开行周期 `(period, mask)`：`train_rules` 里的一行。
+    ///
+    /// 老库没有 `train_rules` 表时返回 `Ok(None)`——界面据此退回「区间内天天开行」。
+    pub fn train_rule(&self, rule_index: Option<i64>) -> rusqlite::Result<Option<(i64, i64)>> {
+        let Some(rule_index) = rule_index else {
+            return Ok(None);
+        };
+        let found = self.conn.query_row(
+            "SELECT period, mask FROM train_rules WHERE rule_index = ?1",
+            [rule_index],
+            |row| Ok((int(row, 0)?, int(row, 1)?)),
+        );
+        match found {
+            Ok(rule) => Ok(Some(rule)),
+            // 表不存在（老库）或这一行缺失，都当作没有规则。
+            Err(rusqlite::Error::SqliteFailure(_, _))
+            | Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// 某一天这趟车开不开行。
+    ///
+    /// 口径与 `docs/llt-format-reverse-engineering.md` §12 一致，实现在
+    /// [`date::run_state`]。
+    pub fn run_state(&self, train: &TrainSummary, date: i64) -> date::RunState {
+        let (period, mask) = self
+            .train_rule(train.rule_index)
+            .ok()
+            .flatten()
+            .unwrap_or((1, 0));
+        date::run_state(train.date_from, train.date_to, date, period, mask)
+    }
+
     pub fn train_detail(&self, train_index: i64) -> rusqlite::Result<TrainDetail> {
         let summary = self.conn.query_row(
-            &format!("SELECT {TRAIN_COLUMNS} FROM trains WHERE train_index = ?1"),
+            &format!(
+                "SELECT {} FROM trains WHERE train_index = ?1",
+                self.train_columns
+            ),
             [train_index],
             map_train,
         )?;
@@ -484,6 +571,8 @@ fn map_train(row: &Row<'_>) -> rusqlite::Result<TrainSummary> {
         days: int(row, 6)?,
         date_from: int(row, 7)?,
         date_to: int(row, 8)?,
+        // 老数据的 trains 表没有这一列：查询语句里有，值就是 NULL。
+        rule_index: row.get::<_, Option<i64>>(9)?,
     })
 }
 
@@ -520,6 +609,42 @@ mod tests {
         let version = db.data_version().expect("fixture 库应记录数据版本");
         assert!(version > 20_000_000, "{version}");
         assert_eq!(db.data_date().unwrap(), date::date_ymd(version));
+    }
+
+    #[test]
+    fn legacy_db_without_rule_index_still_queries() {
+        // 旧库的 trains 表没有 rule_index，也没有 train_rules：列清单要退回 NULL 占位，
+        // 否则 SELECT 直接报 "no such column"。开行计划那边按「区间内天天开行」处理。
+        let path = std::env::temp_dir().join(format!(
+            "llt-legacy-test-{}-{:?}.sqlite",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE stations (station_index INTEGER PRIMARY KEY, station TEXT NOT NULL);
+                 CREATE TABLE trains (train_index INTEGER PRIMARY KEY, train TEXT NOT NULL,
+                     train_no TEXT, type TEXT, date_from INTEGER, date_to INTEGER,
+                     total_km INTEGER, days INTEGER, first_station TEXT, last_station TEXT);
+                 CREATE TABLE stops (train_index INTEGER, station TEXT, seq INTEGER);
+                 INSERT INTO trains VALUES (7, 'K54', '54', '新空调快速', 20260101, 20261231,
+                                            1000, 1, '北京', '上海');",
+            )
+            .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let hits = db.search_trains("K54", None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].code, "K54");
+        assert_eq!(hits[0].rule_index, None);
+        assert!(db.all_rules().is_empty());
+        assert_eq!(db.train_rule(None).unwrap(), None);
+        // 没有周期表：区间内一律开行。
+        let state = db.run_state(&hits[0], 20260601);
+        assert_eq!(state, date::RunState::Running);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

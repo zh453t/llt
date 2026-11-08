@@ -112,7 +112,12 @@ CREATE TABLE stations (station_index INTEGER PRIMARY KEY, station TEXT NOT NULL)
 CREATE TABLE trains (train_index INTEGER PRIMARY KEY, train TEXT NOT NULL,
     train_no TEXT, type TEXT,
     date_from INTEGER, date_to INTEGER, total_km INTEGER, days INTEGER,
-    first_station TEXT, last_station TEXT);
+    first_station TEXT, last_station TEXT,
+    -- t.rule 的行号：配合 date_from 推出每一天开不开行。
+    rule_index INTEGER);
+-- 开行周期（t.rule）：period 天一轮，mask 的第 k 位为 1 表示第 k 天开行。
+CREATE TABLE train_rules (rule_index INTEGER PRIMARY KEY,
+    period INTEGER NOT NULL, mask INTEGER NOT NULL);
 CREATE TABLE stops (train_index INTEGER, train TEXT, seq INTEGER, station_index INTEGER,
     station TEXT, km INTEGER, arrive TEXT, depart TEXT, dwell_min INTEGER, day INTEGER,
     arrive_min INTEGER, depart_min INTEGER,
@@ -190,6 +195,7 @@ pub fn write_csvs(
         "arrive",
         "total_km",
         "days",
+        "rule_index",
     ])?;
     for train in &data.trains {
         let (Some(first), Some(last)) = (train.stops.first(), train.stops.last()) else {
@@ -210,6 +216,7 @@ pub fn write_csvs(
             last.arrive.clone(),
             last.km.to_string(),
             last.day.to_string(),
+            train.rule_index.to_string(),
         ])?;
     }
     written.push(csv.finish()?);
@@ -469,7 +476,7 @@ fn write_sqlite_at(path: &Path, data: &Dataset, extras: &Extras, meta: &Meta) ->
 
     {
         let mut insert =
-            tx.prepare("INSERT INTO trains VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)")?;
+            tx.prepare("INSERT INTO trains VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)")?;
         for train in &data.trains {
             let last = train.stops.last();
             insert.execute(params![
@@ -483,7 +490,15 @@ fn write_sqlite_at(path: &Path, data: &Dataset, extras: &Extras, meta: &Meta) ->
                 last.map(|stop| i64::from(stop.day)),
                 train.stops.first().map(|stop| stop.station.as_str()),
                 last.map(|stop| stop.station.as_str()),
+                i64::from(train.rule_index),
             ])?;
+        }
+    }
+
+    {
+        let mut insert = tx.prepare("INSERT INTO train_rules VALUES (?1, ?2, ?3)")?;
+        for (index, rule) in extras.rules.iter().enumerate() {
+            insert.execute(params![index as i64, rule.period, rule.mask])?;
         }
     }
 
@@ -777,6 +792,7 @@ mod tests {
                 kind: "高速动车".to_owned(),
                 date_from: 20260101,
                 date_to: 20261231,
+                rule_index: 0,
                 stops: vec![
                     stop(0, "甲", "08:00", "08:02"),
                     stop(1, "乙", "09:00", "09:02"),
@@ -812,6 +828,7 @@ mod tests {
             ],
         }]);
         Extras {
+            rules: Vec::new(),
             routes: Some(routes),
             duties: Some(Duties {
                 items: vec![Duty {

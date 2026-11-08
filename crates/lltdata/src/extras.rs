@@ -29,6 +29,15 @@ pub struct DutyTrain {
     pub train_index: usize,
 }
 
+/// 一条开行周期：`period` 天一轮，`mask` 的第 `k` 位为 1 表示第 `k` 天开行。
+///
+/// 来自 `t.rule`，第 `k` 行对应车次头里的 `ruleIndex = k`；周期为 1 时恒开行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunRule {
+    pub period: i64,
+    pub mask: i64,
+}
+
 /// 与主表一起写进 SQLite 的附加数据。
 #[derive(Debug, Default)]
 pub struct Extras {
@@ -43,6 +52,8 @@ pub struct Extras {
     pub station_index: HashMap<String, usize>,
     /// `s.i` 车站顺序表，`station_index` -> 站名。
     pub station_names: Vec<String>,
+    /// `t.rule` 开行周期表，下标即车次头里的 `ruleIndex`。
+    pub rules: Vec<RunRule>,
     pub notes: Vec<String>,
 }
 
@@ -60,6 +71,8 @@ impl Extras {
         let (duties, duty_trains) = load_duties(shards, train_codes, &mut notes);
         // 同城车站：sn.dat，越界的组会被丢弃并提示。
         let same_city = load_same_city(shards, stations.len(), &mut notes);
+        // 开行周期：t.rule，缺了只是没有日历，不影响时刻表。
+        let rules = load_rules(shards, &mut notes);
 
         Self {
             routes,
@@ -73,6 +86,7 @@ impl Extras {
                 .map(|(index, name)| (name.clone(), index))
                 .collect(),
             station_names: stations.to_vec(),
+            rules,
             notes,
         }
     }
@@ -146,6 +160,27 @@ impl Extras {
 }
 
 /// 解析 `routes.dat` + `sp.dat`，得到线路表与每趟车的经由。
+/// 读 `t.rule`：每行「周期 掩码」，第 k 行即 `ruleIndex = k`。
+fn load_rules(shards: &ShardDir, notes: &mut Vec<String>) -> Vec<RunRule> {
+    let Some(bytes) = shards.read("t.rule").ok() else {
+        notes.push("缺少 t.rule，开行计划日历不可用".to_owned());
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let mut rules = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(period), Some(mask)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        match (period.parse::<i64>(), mask.parse::<i64>()) {
+            (Ok(period), Ok(mask)) => rules.push(RunRule { period, mask }),
+            _ => notes.push(format!("t.rule 有一行读不出来：{line}")),
+        }
+    }
+    rules
+}
+
 fn load_routes(shards: &ShardDir, notes: &mut Vec<String>) -> (Option<Routes>, Vec<TrainVia>) {
     let (Ok(route_bytes), Ok(sp_bytes)) = (shards.read("routes.dat"), shards.read("sp.dat")) else {
         notes.push("缺少 routes.dat 或 sp.dat，跳过经由信息".to_owned());

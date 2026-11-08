@@ -148,6 +148,14 @@ pub fn detail_header_height() -> f32 {
     }
 }
 
+/// 开行计划日历的格子边长。
+pub fn plan_cell() -> f32 {
+    match pointer() {
+        Pointer::Mouse => 22.0,
+        Pointer::Touch => 32.0,
+    }
+}
+
 /// 滚动条宽度：触摸时拉宽，不然拖不住。
 pub fn scroll_bar_width() -> f32 {
     match pointer() {
