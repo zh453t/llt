@@ -3161,21 +3161,24 @@ fn via_table_ui(
                     // 跨线站的线路名写作 `A/B`（共用本站）。触摸屏上不再截成「A/…」，
                     // 而是按 `/` 拆开、每条线占一行；行高由下面的循环按段数放大。
                     if multiline && point.line.contains('/') {
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 1.0;
-                            for segment in point.line.split('/').map(str::trim) {
-                                if segment.is_empty() {
-                                    continue;
-                                }
-                                let mut text = RichText::new(segment).size(theme::FONT_META);
-                                if changed {
-                                    text = text.color(warn);
-                                }
-                                ui.label(text);
-                            }
-                        })
-                        .response
-                        .on_hover_text(tip);
+                        // 用一个带换行符的 Label，而不是 ui.vertical + 多个 Label：
+                        // 前者的垂直居中与其它单元格完全一致；ui.vertical 在单元格里
+                        // 会贴顶，上下内边距一多一少。
+                        let joined = point
+                            .line
+                            .split('/')
+                            .map(str::trim)
+                            .filter(|segment| !segment.is_empty())
+                            .collect::<Vec<_>>()
+                            .join(
+                                "
+",
+                            );
+                        let mut text = RichText::new(joined);
+                        if changed {
+                            text = text.color(warn);
+                        }
+                        ui.add(egui::Label::new(text)).on_hover_text(tip);
                     } else {
                         let text = if changed {
                             RichText::new(&point.line).color(warn)
@@ -3201,7 +3204,7 @@ fn via_table_ui(
                         .filter(|segment| !segment.trim().is_empty())
                         .count()
                         .max(1);
-                    let extra = (segments as f32 - 1.0) * (theme::FONT_META + 4.0);
+                    let extra = (segments as f32 - 1.0) * (theme::FONT_BODY + 6.0);
                     body.row(theme::detail_row_height() + extra, |row| {
                         draw(row, index);
                     });
