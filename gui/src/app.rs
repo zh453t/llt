@@ -77,6 +77,20 @@ enum FocusField {
     OdTo,
 }
 
+/// 一个查询页要画哪一半。
+///
+/// 竖屏是「控件在上、结果在下」的一整页；横屏把两半拆到左右两栏
+/// （左栏控件、右栏结果），表格才能拿到完整高度。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TabPart {
+    /// 竖屏：控件 + 结果上下排（原有行为）。
+    Stacked,
+    /// 横屏左栏：只画控件。
+    Controls,
+    /// 横屏右栏：只画结果。
+    Results,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OdField {
     From,
@@ -950,11 +964,15 @@ impl LltApp {
         }
     }
 
-    fn train_ui(&mut self, ui: &mut Ui) {
+    fn train_ui(&mut self, ui: &mut Ui, part: TabPart) {
         let bar = self.bottom_bar();
         let width = ui.available_width();
         let field_width = (width * 0.34).clamp(140.0, 240.0);
         let mut clear = false;
+        if part == TabPart::Results {
+            self.train_results_ui(ui, bar);
+            return;
+        }
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP_S;
             ui.label(RichText::new("车次").size(theme::FONT_BODY));
@@ -981,6 +999,13 @@ impl LltApp {
             // 清空是为了立刻重输，焦点留在（还给）输入框。
             self.focus_request = Some(FocusField::Train);
         }
+        if part == TabPart::Stacked {
+            self.train_results_ui(ui, bar);
+        }
+    }
+
+    /// 按车次的结果半页：空状态或（分「当日开行 / 不开行」的）车次表。
+    fn train_results_ui(&mut self, ui: &mut Ui, bar: bool) {
         ui.add_space(theme::GAP_S);
 
         if self.train_query.trim().is_empty() {
@@ -1116,8 +1141,12 @@ impl LltApp {
         clicked
     }
 
-    fn station_ui(&mut self, ui: &mut Ui) {
+    fn station_ui(&mut self, ui: &mut Ui, part: TabPart) {
         let bar = self.bottom_bar();
+        if part == TabPart::Results {
+            self.station_results_ui(ui, bar);
+            return;
+        }
         let width = ui.available_width();
         let field_width = (width * 0.34).clamp(140.0, 240.0);
         let mut clear = false;
@@ -1288,6 +1317,13 @@ impl LltApp {
             }
         }
 
+        if part == TabPart::Stacked {
+            self.station_results_ui(ui, bar);
+        }
+    }
+
+    /// 按车站的结果半页：空状态或按到达时刻排序的停站表。
+    fn station_results_ui(&mut self, ui: &mut Ui, bar: bool) {
         ui.add_space(theme::GAP_S);
         if self.station_board_for.is_none() {
             if self.station_query.trim().is_empty() {
@@ -1473,27 +1509,39 @@ impl LltApp {
         clicked
     }
 
-    fn od_ui(&mut self, ui: &mut Ui) {
-        let width = ui.available_width();
-        // 一行里放：模糊（~46 点）+ 出发框 + ⇌ + 到达框。
-        // 站名最长 5 个汉字（5 × 15 点 = 75），所以输入框下限取 96 点，
-        // 再窄就会把「呼和浩特东」「八达岭西所」这类站名截掉。
+    fn od_ui(&mut self, ui: &mut Ui, part: TabPart) {
+        if part == TabPart::Results {
+            self.od_results_ui(ui);
+            return;
+        }
+        // 竖屏一行放：模糊 + 出发框 + ⇌ + 到达框；横屏（侧栏）把模糊挪到下一行，
+        // 两个框因此能宽一些。站名最长 5 个汉字（5 × 15 点 = 75），下限仍取 96 点。
+        let landscape = part == TabPart::Controls;
         let swap_width = theme::control_height();
-        let fuzzy_width = 52.0;
-        let field_width =
-            ((width - fuzzy_width - swap_width - theme::GAP_S * 4.0) / 2.0).clamp(96.0, 200.0);
         let mut changed = false;
         // 触摸屏上「模糊 / 查询」在底栏（`od_bar`），这里只留两个输入框与交换按钮。
         let bar = self.bottom_bar();
-        ui.horizontal_wrapped(|ui| {
+        // 这一行不换行：模糊 + 出发 + ⇌ + 到达 必须并排（换行会让到达框单独掉到下一行）。
+        ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP_S;
-            // 「模糊」在输入框左边：它是「怎么匹配输入」的开关，贴着输入放最直观。
-            let fuzzy = ui
-                .checkbox(&mut self.od_fuzzy, meta("模糊"))
-                .on_hover_text("模糊搜索：出发/到达按城市或同城组匹配所有车站");
-            if fuzzy.changed() {
-                changed = true;
+            // 「模糊」在输入框左边（竖屏）：它是「怎么匹配输入」的开关，贴着输入最直观。
+            // 横屏的侧栏窄，它挪到输入框下面一行（见下面的 `if landscape`）。
+            if !landscape {
+                let fuzzy = ui
+                    .checkbox(&mut self.od_fuzzy, meta("模糊"))
+                    .on_hover_text("模糊搜索：出发/到达按城市或同城组匹配所有车站");
+                if fuzzy.changed() {
+                    changed = true;
+                }
             }
+            // 输入框宽度按「模糊之后还剩多少」现算：侧栏（横屏左栏）本来就窄，
+            // 用估算常量会算多半行，到达框就被挤到下一行去了。
+            // TextEdit 的 `desired_width` 不含它自己的左右内边距（合计约 8 点），
+            // 所以每个框要多预留一份，否则两个框加起来会超出这一行。
+            const INPUT_CHROME: f32 = 10.0;
+            let rest = ui.available_width();
+            let field_width =
+                ((rest - swap_width - theme::GAP_S * 2.0) / 2.0 - INPUT_CHROME).clamp(96.0, 200.0);
             // 两个框不再带标签：占位符已经说明了是出发站还是到达站，省下的宽度给输入。
             let from = ui.add(query_input(&mut self.od_from, "出发站", field_width));
             self.take_focus(ui, FocusField::OdFrom, &from);
@@ -1542,6 +1590,14 @@ impl LltApp {
                 }
             }
         });
+        if landscape
+            && ui
+                .checkbox(&mut self.od_fuzzy, meta("模糊"))
+                .on_hover_text("模糊搜索：出发/到达按城市或同城组匹配所有车站")
+                .changed()
+        {
+            changed = true;
+        }
         if changed {
             self.refresh_od();
         }
@@ -1673,6 +1729,13 @@ impl LltApp {
             });
         }
 
+        if part == TabPart::Stacked {
+            self.od_results_ui(ui);
+        }
+    }
+
+    /// 站站的结果半页：筛选后的直达车次表（触摸竖屏走六列可横向滚动的版本）。
+    fn od_results_ui(&mut self, ui: &mut Ui) {
         let filtered: Vec<&OdResult> = self
             .od_results
             .iter()
@@ -1898,10 +1961,12 @@ impl LltApp {
         selected: Option<i64>,
         salt: &str,
     ) -> Option<i64> {
-        const STATUS: f32 = 28.0;
-        const CODE: f32 = 88.0;
-        const STATION: f32 = 84.0;
-        const TIME: f32 = 76.0;
+        // 六列 + 间距 ≈ 428 点：横屏右栏（约 450 点）放得下，最后一列不会被切；
+        // 竖屏照旧横向滚动。「状态」两个汉字要 26 点，再小表头就被截成「…」。
+        const STATUS: f32 = 30.0;
+        const CODE: f32 = 74.0;
+        const STATION: f32 = 78.0;
+        const TIME: f32 = 64.0;
         let spacing = ui.spacing().item_spacing.x;
         let total = STATUS + CODE + STATION + TIME + STATION + TIME + spacing * 5.0;
         let pitch = theme::list_row_height() + ui.spacing().item_spacing.y;
@@ -2470,6 +2535,49 @@ impl LltApp {
             }
         }
 
+        // 横屏（矮而宽）：竖排那套「输入 + 筛选 + 底栏两行」会把表格压成一条缝，
+        // 改成左右两栏——左栏标签 + 控件 + 动作，右栏只放结果表。
+        let landscape = self.bottom_bar()
+            && !touch_page
+            && ui.available_height() < theme::LANDSCAPE_MAX_HEIGHT
+            && ui.available_width() >= theme::LANDSCAPE_MIN_WIDTH;
+        if landscape {
+            // 0.44 是量出来的：站站那行要「模糊 + 两个 96 点的框 + ⇌ + 间距」≈ 312 点，
+            // 侧栏内容宽（扣掉左右各 12 点留白）得比它再宽一点才不会换行。
+            let side_width = (ui.available_width() * 0.44).clamp(312.0, 400.0);
+            egui::Panel::left("query_side")
+                .resizable(false)
+                .exact_size(side_width)
+                .frame(theme::panel_frame(ui))
+                .show(ui, |ui| {
+                    // 动作行贴底，控件在它上面滚动（横屏高度小，控件多的页面要能滚）。
+                    if self.action_bar_needed() {
+                        egui::Panel::bottom("side_actions")
+                            .frame(egui::Frame::NONE)
+                            .show(ui, |ui| {
+                                ui.add_space(theme::GAP_XS);
+                                ui.separator();
+                                self.action_bar(ui);
+                            });
+                    }
+                    egui::ScrollArea::vertical()
+                        .id_salt("side_controls")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            self.tab_bar_segments(ui);
+                            ui.add_space(theme::GAP_XS);
+                            ui.separator();
+                            ui.add_space(theme::GAP_XS);
+                            self.error_banner(ui);
+                            self.tab_ui(ui, TabPart::Controls);
+                        });
+                });
+            egui::CentralPanel::default()
+                .frame(theme::panel_frame(ui))
+                .show(ui, |ui| self.tab_ui(ui, TabPart::Results));
+            return;
+        }
+
         // 触摸屏的底栏：标签页在最底下，动作行在它上面。
         // 之所以放底部：标签页与「查询/清空/模糊」这些都不是输入框，却是表格上方
         // 最占高度的东西；挪到拇指能够到的地方，表格就能多几行。
@@ -2493,16 +2601,27 @@ impl LltApp {
                     return;
                 }
                 self.error_banner(ui);
-                match self.tab {
-                    Tab::Train => self.train_ui(ui),
-                    Tab::Station => {
-                        self.return_banner(ui);
-                        self.station_ui(ui);
-                    }
-                    Tab::Od => self.od_ui(ui),
-                    Tab::Data => self.data_ui(ui),
-                }
+                self.tab_ui(ui, TabPart::Stacked);
             });
+    }
+
+    /// 按当前标签页画它的某一半（竖屏整页 / 横屏左栏控件 / 横屏右栏结果）。
+    fn tab_ui(&mut self, ui: &mut Ui, part: TabPart) {
+        match self.tab {
+            Tab::Train => self.train_ui(ui, part),
+            Tab::Station => {
+                if part != TabPart::Results {
+                    self.return_banner(ui);
+                }
+                self.station_ui(ui, part);
+            }
+            Tab::Od => self.od_ui(ui, part),
+            Tab::Data => {
+                if part != TabPart::Controls {
+                    self.data_ui(ui);
+                }
+            }
+        }
     }
 
     /// 是否是触摸屏（底栏只在触摸屏上出现；桌面保持原来的三行头部）。

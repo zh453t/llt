@@ -170,6 +170,11 @@ pub const OD_COLUMNS_MIN_WIDTH: f32 = 840.0;
 /// 宽度不够时不再压缩列，而是允许横向溢出、用横向滚动看全。
 pub const OD_TOUCH_SCROLL_WIDTH: f32 = 640.0;
 
+/// 触摸屏上「横屏布局」的判定：高度比这矮、宽度比这宽，就左右分栏
+/// （手机横屏 851×393 命中；平板 1024×768 不命中，保持竖排 + 底栏）。
+pub const LANDSCAPE_MAX_HEIGHT: f32 = 520.0;
+pub const LANDSCAPE_MIN_WIDTH: f32 = 640.0;
+
 /// 常用间距，全部取 4 的倍数。
 pub const GAP_XS: f32 = 4.0;
 pub const GAP_S: f32 = 8.0;
