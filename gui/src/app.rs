@@ -1524,23 +1524,14 @@ impl LltApp {
             }
 
             if !bar {
+                // 边打边查，这个按钮只是兜底，别做成主操作。
                 let can_query = !self.od_from.trim().is_empty() && !self.od_to.trim().is_empty();
-                let (fill, text_color) = if can_query {
-                    (theme::primary_fill(ui), theme::primary_text())
-                } else {
-                    (
-                        ui.visuals().widgets.inactive.weak_bg_fill,
-                        ui.visuals().weak_text_color(),
-                    )
-                };
-                let button = egui::Button::new(
-                    RichText::new("查询")
-                        .size(theme::FONT_BODY)
-                        .color(text_color),
-                )
-                .fill(fill)
-                .stroke(egui::Stroke::NONE);
-                if ui.add_enabled(can_query, button).clicked() {
+                let button = egui::Button::new(meta("刷新"));
+                if ui
+                    .add_enabled(can_query, button)
+                    .on_hover_text("重新查询（输入变化时会自动刷新）")
+                    .clicked()
+                {
                     changed = true;
                 }
             }
@@ -1640,11 +1631,13 @@ impl LltApp {
             ui.scope(|ui| {
                 ui.spacing_mut().interact_size.y = theme::chip_height();
                 ui.spacing_mut().button_padding = theme::chip_padding();
+                ui.spacing_mut().item_spacing.x = theme::GAP_XS;
+                ui.spacing_mut().item_spacing.y = 3.0;
+                // 出发、到达各占一行：「筛选」两个字省了，方向由 chip 前面的标签说明；
+                // 分成两行后每侧都能多放几个站名，不再混在一起换行。
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = theme::GAP_XS;
                     ui.spacing_mut().item_spacing.y = 3.0;
-                    ui.label(meta("筛选").weak());
-                    ui.add_space(theme::GAP_XS);
                     Self::filter_chips(
                         ui,
                         "出发",
@@ -1652,7 +1645,10 @@ impl LltApp {
                         &from_available,
                         &mut self.od_filter_from,
                     );
-                    ui.add_space(theme::GAP_S);
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = theme::GAP_XS;
+                    ui.spacing_mut().item_spacing.y = 3.0;
                     Self::filter_chips(
                         ui,
                         "到达",
@@ -1906,12 +1902,19 @@ impl LltApp {
         let content_height = theme::list_header_height() + rows.len() as f32 * pitch + theme::GAP_S;
 
         let mut clicked = None;
+        // 滚动条做成「浮动 + 细」：平时不占位、几乎看不见，拖动时才浮出来一点。
+        // 表格本来就是横向溢出可拖的，粗滚动条只会抢走一行高度和视觉重心。
+        let mut scroll_style = egui::style::ScrollStyle::floating();
+        scroll_style.bar_width = 8.0;
+        scroll_style.floating_width = 4.0;
+        ui.style_mut().spacing.scroll = scroll_style;
         // 只用一个「横竖都能滚」的区域：表格自己不再抢拖动。
         // 嵌套两个 ScrollArea 时，内层（表格的纵向滚动）会把手指拖动全吃掉，
         // 结果横向只能拖滚动条——这正是之前的毛病。
         egui::ScrollArea::both()
             .id_salt((salt, "scroll"))
             .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
             .show(ui, |ui| {
                 // 给表格一个「比视口宽、比视口高」的容器，它才会按固定列宽铺开。
                 ui.allocate_ui_with_layout(
@@ -2520,7 +2523,6 @@ impl LltApp {
 
     /// 站站的动作行：模糊 / 查询（「交换」在两个输入框中间，不在这里）。
     fn od_bar(&mut self, ui: &mut Ui) {
-        let height = theme::control_height();
         let mut changed = false;
         if ui
             .checkbox(&mut self.od_fuzzy, meta("模糊"))
@@ -2533,23 +2535,15 @@ impl LltApp {
         let (running, not_running) = self.running_split();
         let total = self.od_shown_count();
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let (fill, text_color) = if can_query {
-                (theme::primary_fill(ui), theme::primary_text())
-            } else {
-                (
-                    ui.visuals().widgets.inactive.weak_bg_fill,
-                    ui.visuals().weak_text_color(),
-                )
-            };
-            let button = egui::Button::new(
-                RichText::new("查询")
-                    .size(theme::FONT_BODY)
-                    .color(text_color),
-            )
-            .fill(fill)
-            .stroke(egui::Stroke::NONE)
-            .min_size(egui::vec2(88.0, height));
-            if ui.add_enabled(can_query, button).clicked() {
+            // 「刷新」只是兜底：三个查询页都边打边查，用户正常不会按它，
+            // 所以做成 chip 大小、次要样式，别抢视觉重心。
+            let button =
+                egui::Button::new(meta("刷新")).min_size(egui::vec2(48.0, theme::chip_height()));
+            if ui
+                .add_enabled(can_query, button)
+                .on_hover_text("重新查询（输入变化时会自动刷新）")
+                .clicked()
+            {
                 changed = true;
             }
             counts_label(ui, total, running, not_running);
