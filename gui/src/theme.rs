@@ -147,9 +147,10 @@ pub const GAP_XS: f32 = 4.0;
 pub const GAP_S: f32 = 8.0;
 pub const GAP_M: f32 = 12.0;
 
-/// 面板内边距（左/右, 上/下）。
+/// 面板内边距（左/右, 上/下）。触摸时上下收一点，把高度让给内容。
 pub const PANEL_MARGIN_X: i8 = 12;
 pub const PANEL_MARGIN_Y: i8 = 8;
+const PANEL_MARGIN_TOUCH_Y: i8 = 6;
 /// 详情面板内边距。
 pub const DETAIL_MARGIN_X: i8 = 12;
 pub const DETAIL_MARGIN_Y: i8 = 10;
@@ -168,8 +169,12 @@ pub fn meta_color(ui: &egui::Ui) -> Color32 {
 
 /// 顶部 / 中央 / 侧边面板统一的内边距与底色。
 pub fn panel_frame(ui: &egui::Ui) -> egui::Frame {
+    let margin_y = match pointer() {
+        Pointer::Mouse => PANEL_MARGIN_Y,
+        Pointer::Touch => PANEL_MARGIN_TOUCH_Y,
+    };
     egui::Frame::new()
-        .inner_margin(Margin::symmetric(PANEL_MARGIN_X, PANEL_MARGIN_Y))
+        .inner_margin(Margin::symmetric(PANEL_MARGIN_X, margin_y))
         .fill(ui.visuals().panel_fill)
 }
 

@@ -716,6 +716,26 @@ impl LltApp {
 
     fn header(&mut self, ui: &mut Ui) {
         let width = ui.available_width();
+        // 触摸窄屏（手机）把标题、日期、主题塞进同一行：三行头部会吃掉两成的屏幕，
+        // 而标签页那一行已经够宽了。
+        let dense = theme::pointer() == theme::Pointer::Touch && width < WIDE_MIN_WIDTH;
+        if dense {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("路路通时刻表")
+                        .size(theme::FONT_SECTION)
+                        .family(fonts::bold_family()),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    self.theme_button(ui);
+                    ui.add_space(theme::GAP_S);
+                    self.date_picker(ui, false);
+                });
+            });
+            ui.add_space(theme::GAP_XS);
+            self.tab_bar(ui);
+            return;
+        }
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new("路路通时刻表")
@@ -730,15 +750,7 @@ impl LltApp {
                     .on_hover_text(format!("数据包版本 {version}（库内 meta.data_version）"));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let dark = ui.visuals().dark_mode;
-                let (label, next_theme) = if dark {
-                    ("浅色", egui::Theme::Light)
-                } else {
-                    ("深色", egui::Theme::Dark)
-                };
-                if ui.add(egui::Button::new(meta(label))).clicked() {
-                    ui.ctx().set_theme(next_theme);
-                }
+                self.theme_button(ui);
                 if width > 980.0 {
                     let file_name = self
                         .db_path
@@ -753,6 +765,26 @@ impl LltApp {
 
         ui.add_space(theme::GAP_S);
         let inline_date = ui.available_width() >= theme::INLINE_DATE_MIN_WIDTH;
+        ui.horizontal(|ui| {
+            self.tab_bar(ui);
+            // 宽屏时日期控件跟在标签页后面；窄屏单独一行，避免日期被换行拆散。
+            if inline_date {
+                ui.add_space(theme::GAP_M);
+                ui.separator();
+                ui.add_space(theme::GAP_M);
+                self.date_controls(ui);
+            }
+        });
+        if !inline_date {
+            ui.add_space(theme::GAP_XS);
+            ui.horizontal(|ui| self.date_controls(ui));
+        }
+    }
+
+    /// 标签页那一行。触摸窄屏与宽屏共用，只有日期控件的位置不同。
+    fn tab_bar(&mut self, ui: &mut Ui) {
+        // 自己起一个水平布局：宽屏时调用方本来就在 `ui.horizontal` 里，
+        // 嵌套只是把标签页圈成一组；触摸窄屏那一行是竖的，这里必须横过来。
         ui.horizontal(|ui| {
             // 标签页之间只靠内边距分隔，避免多余的分隔线。
             ui.spacing_mut().item_spacing.x = 2.0;
@@ -776,23 +808,49 @@ impl LltApp {
                     self.focus_request = Some(self.focus_field(tab));
                 }
             }
-
             if self.tab != entered && self.tab == Tab::Data {
                 // 进数据页时重读一次：库可能刚被命令行或别的进程换掉。
                 self.data.refresh(&self.db_path);
             }
-
-            // 宽屏时日期控件跟在标签页后面；窄屏单独一行，避免日期被换行拆散。
-            if inline_date {
-                ui.add_space(theme::GAP_M);
-                ui.separator();
-                ui.add_space(theme::GAP_M);
-                self.date_controls(ui);
-            }
         });
-        if !inline_date {
+    }
+
+    /// 浅色 / 深色切换。
+    fn theme_button(&mut self, ui: &mut Ui) {
+        let dark = ui.visuals().dark_mode;
+        let (label, next_theme) = if dark {
+            ("浅色", egui::Theme::Light)
+        } else {
+            ("深色", egui::Theme::Dark)
+        };
+        if ui.add(egui::Button::new(meta(label))).clicked() {
+            ui.ctx().set_theme(next_theme);
+        }
+    }
+
+    /// 只要日期选择控件本身（触摸窄屏并进标题行的紧凑版本）。
+    ///
+    /// `with_weekday` 为假时不画「周日」「今天」：那一行还要放主题按钮，
+    /// 星期从日期按钮的弹窗里也能看到。
+    fn date_picker(&mut self, ui: &mut Ui, with_weekday: bool) {
+        ui.add(
+            DatePickerButton::new(&mut self.date)
+                .id_salt("query_date")
+                .show_icon(false)
+                .highlight_weekends(false)
+                .calendar_week(false)
+                .start_end_years(2000..=2100),
+        );
+        if !with_weekday {
+            return;
+        }
+        ui.label(meta(weekday_cn(self.date)).weak());
+        let current_date = today();
+        if self.date != current_date {
             ui.add_space(theme::GAP_XS);
-            ui.horizontal(|ui| self.date_controls(ui));
+            if ui.add(egui::Button::new(meta("今天"))).clicked() {
+                self.date = current_date;
+            }
         }
     }
 
@@ -802,23 +860,7 @@ impl LltApp {
     fn date_controls(&mut self, ui: &mut Ui) {
         ui.spacing_mut().item_spacing.x = theme::GAP_S;
         ui.label(meta("查询日期").weak());
-        ui.add(
-            DatePickerButton::new(&mut self.date)
-                .id_salt("query_date")
-                .show_icon(false)
-                // 默认的红色周末高亮和 ISO 周数列与本应用的配色/信息密度不符。
-                .highlight_weekends(false)
-                .calendar_week(false)
-                .start_end_years(2000..=2100),
-        );
-        ui.label(meta(weekday_cn(self.date)).weak());
-        let current_date = today();
-        if self.date != current_date {
-            ui.add_space(theme::GAP_XS);
-            if ui.add(egui::Button::new(meta("今天"))).clicked() {
-                self.date = current_date;
-            }
-        }
+        self.date_picker(ui, true);
     }
 
     fn error_banner(&mut self, ui: &mut Ui) {
@@ -2190,7 +2232,19 @@ impl LltApp {
             egui::CentralPanel::default()
                 .frame(theme::panel_frame(ui))
                 .show(ui, |ui| {
-                    if let Some(error) = &self.db_error {
+                    // 库文件压根不存在时别把 SQLite 的原话怼到脸上：那是「还没下载」，
+                    // 不是「坏了」。真正的打开失败（文件在但结构不对）才显示原文。
+                    let missing = !self.db_path.is_file();
+                    if missing {
+                        ui.label(
+                            RichText::new("还没有时刻表数据")
+                                .size(theme::FONT_SECTION)
+                                .family(fonts::bold_family()),
+                        );
+                        ui.label(meta("下载一份数据，或导入之前的备份。"));
+                        ui.add_space(theme::GAP_S);
+                    }
+                    if let Some(error) = self.db_error.as_ref().filter(|_| !missing) {
                         ui.label(
                             RichText::new(error)
                                 .size(theme::FONT_META)
