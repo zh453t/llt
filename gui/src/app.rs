@@ -23,6 +23,29 @@ use theme::WIDE_MIN_WIDTH;
 /// 读系统栏缩进的最小间隔：软键盘、导航栏、旋转屏幕都会改它，但不必逐帧过 JNI。
 const INSET_PROBE_INTERVAL: Duration = Duration::from_millis(150);
 
+/// 系统栏缩进，单位是**逻辑点**。
+///
+/// 刻意不用 `egui::Margin`：它的字段是 `i8`，手机上软键盘能有 350 多点高，
+/// 会被截断到 127，底栏就停在键盘后面不动（这正是「软键盘弹出时底栏不动」的原因）。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Insets {
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+}
+
+impl Insets {
+    fn is_zero(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// 左右与上下各占多少。
+    fn size(&self) -> egui::Vec2 {
+        egui::vec2(self.left + self.right, self.top + self.bottom)
+    }
+}
+
 /// 标签页的文案与焦点规则。可写入配置的那份定义在 [`config::Tab`]（带 serde + 默认值）。
 impl Tab {
     fn label(self) -> &'static str {
@@ -2311,20 +2334,14 @@ impl eframe::App for LltApp {
         // 框缩进安全区，免得上栏被状态栏盖住、底部表格被导航条盖住。
         let full = ui.max_rect();
         let insets = self.safe_insets(ui.ctx());
-        if insets == egui::Margin::ZERO {
+        if insets.is_zero() {
             self.body(ui);
             return;
         }
         ui.painter().rect_filled(full, 0.0, ui.visuals().panel_fill);
         let safe = egui::Rect::from_min_max(
-            egui::pos2(
-                full.min.x + f32::from(insets.left),
-                full.min.y + f32::from(insets.top),
-            ),
-            egui::pos2(
-                full.max.x - f32::from(insets.right),
-                full.max.y - f32::from(insets.bottom),
-            ),
+            full.min + egui::vec2(insets.left, insets.top),
+            full.max - egui::vec2(insets.right, insets.bottom),
         );
         ui.scope_builder(egui::UiBuilder::new().max_rect(safe), |ui| self.body(ui));
     }
@@ -2347,7 +2364,7 @@ impl LltApp {
     /// 有回调时最多每 [`INSET_PROBE_INTERVAL`] 问一次：`WindowInsets` 会因
     /// 软键盘弹出、导航栏隐藏、旋转屏幕而变，这些都不是应用能直接感知的事件；
     /// 帧本来就在跟着事件走，所以「每帧最多问一次」就够了，而且不逐帧过 JNI。
-    fn safe_insets(&mut self, ctx: &egui::Context) -> egui::Margin {
+    fn safe_insets(&mut self, ctx: &egui::Context) -> Insets {
         let due = self
             .inset_probe_at
             .is_none_or(|at| at.elapsed() >= INSET_PROBE_INTERVAL);
@@ -2360,14 +2377,14 @@ impl LltApp {
         self.insets_points(ctx)
     }
 
-    /// 缩进换算成逻辑点（egui 的 `Margin` 单位）。只读，不触发询问。
-    fn insets_points(&self, ctx: &egui::Context) -> egui::Margin {
+    /// 缩进换算成逻辑点。只读，不触发询问。
+    fn insets_points(&self, ctx: &egui::Context) -> Insets {
         if self.safe_area == crate::ScreenInsets::default() {
-            return egui::Margin::ZERO;
+            return Insets::default();
         }
         let scale = 1.0 / ctx.pixels_per_point();
-        let points = |value: u32| (value as f32 * scale).round().clamp(0.0, 127.0) as i8;
-        egui::Margin {
+        let points = |value: u32| (value as f32 * scale).round();
+        Insets {
             left: points(self.safe_area.left),
             right: points(self.safe_area.right),
             top: points(self.safe_area.top),
@@ -2382,11 +2399,7 @@ impl LltApp {
     fn safe_screen(&self, ctx: &egui::Context) -> egui::Vec2 {
         let full = ctx.content_rect().size();
         let insets = self.insets_points(ctx);
-        let used = egui::vec2(
-            f32::from(insets.left) + f32::from(insets.right),
-            f32::from(insets.top) + f32::from(insets.bottom),
-        );
-        (full - used).max(egui::vec2(240.0, 240.0))
+        (full - insets.size()).max(egui::vec2(240.0, 240.0))
     }
 
     /// 除系统栏缩进以外的主体布局。
