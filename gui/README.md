@@ -165,6 +165,9 @@ GUI 读 `trains`、`stops`、`stations` 三张主表；交路 / 车型 / 餐车 
   部分后端的默认值偏高（模拟器的 SwiftShader Vulkan 只给 16 KiB 的 uniform buffer）。
 - 系统栏缩进（状态栏 / 导航栏 / 软键盘 / 刘海）由 `ScreenInsets` 描述，桌面恒为 0；
   Android 传回调，界面最多每 150 ms 问一次，根 `Ui` 的矩形随之缩进。
+- 「数据」页（`gui/src/data.rs`）在两端共用：检查更新、下载重建、备份导入导出。
+  耗时动作在后台线程里跑，结果用 channel 回传；Android 的导入导出由
+  `files::FilePicker` 转给系统的文件选择器，桌面直接读写可执行文件旁的目录。
 - `rusqlite` + bundled SQLite，单文件可执行，无需系统安装 SQLite。
 - 中文字体：正文依赖 eframe 默认自带的 `system_fonts`，缺字时按需从系统中文字体回退；
   需要真正加粗的文字（应用标题、车次号、表头、终到站）额外加载

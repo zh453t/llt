@@ -8,14 +8,16 @@ Rust workspace，把路路通（`com.lltskb.lltskb`）的离线数据包 `an.db`
 | `cli/` | `llt` | `build`：下载/解码 `an.db` → SQLite/CSV；`query`：查询数据库 |
 | `gui/` | `llt-gui` | egui 桌面查询界面（车次 / 车站 / 站站），只读 SQLite；另提供 lib `llt_gui` 给 Android 入口复用 |
 | `crates/lltdb/` | `lltdb` | 两个应用共用的只读查询层（含经由 / 交路 / 餐车，只依赖 `rusqlite` 与 `jiff`） |
-| `android/` | `llt-gui-android` | Android 入口（cdylib）与打包配置，独立包、不参与 workspace，见 [`docs/android.md`](docs/android.md) |
+| `crates/lltdata/` | `lltdata` | 数据管线：下载 / 解包 / 解码 / 写库 / 版本比对，CLI、桌面与 Android 共用 |
+| `android/` | `llt-gui-android` | Android 平台胶水（入口、输入法、文件选择器）与 Gradle 工程，独立包、不参与 workspace，见 [`docs/android.md`](docs/android.md) |
 | `tools/` | — | Python 参考实现 `tools/decode_llt.py` |
 | `out/` | — | 已解码的数据；`out/timetable/README.md` 是格式、表结构与数据版本说明 |
 | `docs/` | — | 逆向报告与二进制格式说明 |
 
-依赖方向是 `llt-gui → lltdb`、`llt → lltdb`，`lltdb` 不依赖 GUI 或网络栈；
+依赖方向是 `llt-gui → lltdb`、`llt → lltdb`、`llt → lltdata → lltdb`；
+`lltdb` 不依赖 GUI 或网络栈，`lltdata` 不依赖 GUI。
 GUI 与 CLI 都是单文件可执行程序，静态链接，没有运行时依赖或进程间调用。
-`android/` 复用 `gui/` 里的 `llt_gui` 库，把同一套界面装进 APK。
+`android/` 复用 `gui/` 里的 `llt_gui` 库（连同 `lltdata` 的数据管线），把同一套界面装进 APK。
 
 ## 构建与测试
 
@@ -28,8 +30,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 Android 的 APK 单独构建（不进 workspace，需要 NDK，见 [`docs/android.md`](docs/android.md)）：
 
 ```powershell
-pwsh -File android/build.ps1 -Release   # -> android/target/release/apk/llt-gui.apk
+pwsh -File android/build.ps1 -Release   # -> android/app/build/outputs/apk/release/app-release.apk
 ```
+
+APK **不内置数据库**（41 MB 的数据包随包发不合适）：第一次启动落在「数据」页，
+在应用里下载数据包并解码，或导入一份备份。
 
 ## 数据
 
