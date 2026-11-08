@@ -151,7 +151,31 @@ cargo install cargo-ndk
 ```
 
 `build.ps1` 用的环境变量（不设就用默认值）：`ANDROID_HOME`、`ANDROID_NDK_ROOT`、
-`JAVA_HOME`、`GRADLE_HOME`。
+`JAVA_HOME`、`GRADLE_HOME`。脚本开头会打印 SDK / NDK / JDK（含版本）/ Gradle 的路径，
+并在 JDK 版本高于 Gradle 支持上限、或缺少 platform 34 / build-tools 时直接给出警告。
+
+### 工具链会被 Android Studio 更新改掉
+
+Studio 更新会替换自带的 `jbr`（JDK）、并可能顺带更新 SDK 组件，而这三件事是本仓库
+**写死**的：AGP `8.7.3`、Gradle `8.13`、`compileSdk/targetSdk 34`、NDK `r27d`。
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `Unsupported class file major version 68`（或类似） | Studio 把 jbr 升到了 JDK 24+，Gradle 8.13 只支持到 JDK 23 | 把 `JAVA_HOME` 指回旧 jbr / 别处装的 JDK 21，或把 `GRADLE_HOME` 换到 Gradle 8.14+（同时可能要升 AGP） |
+| `Failed to find Build Tools revision ...` | build-tools 被移走 | SDK Manager 装 `build-tools;34.0.0` |
+| `platforms;android-34` 缺失提示 | 同上 | 装 `platforms;android-34`，或改 `app/build.gradle.kts` 的 `compileSdk` |
+| `NDK not found` / `cargo ndk` 报找不到 NDK | Studio 重装时删了 NDK | 重新解压 r27d 到 `$ANDROID_HOME
+dk.3.13750724`（`build.ps1` 取 `ndk/` 下最新一版） |
+| 依赖下载全部失败且报 `SSL misconfiguration` | `~/.gradle/gradle.properties` 里的代理没开 | 项目里的 `android/gradle.properties` 已用 `systemProp.*.nonProxyHosts=*` 绕开；要用代理就改那两行 |
+
+更新完想确认没坏，跑一遍：
+
+```powershell
+pwsh -File android/build.ps1 -Release      # 开头会打印 SDK/NDK/JDK/Gradle 版本
+adb install -r android/app/build/outputs/apk/release/app-release.apk
+```
+
+真机/模拟器上再点一遍「数据 → 检查更新」，能拿到线上版本就说明网络与清单都没问题。
 
 > **本机代理坑**：`~/.gradle/gradle.properties` 里配了 `127.0.0.1:7890`，代理没开时
 > Gradle 会报 `SSL misconfiguration`。项目的 `android/gradle.properties` 里用

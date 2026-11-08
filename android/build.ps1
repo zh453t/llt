@@ -34,6 +34,8 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 # —— 环境 ——
+$java_version = 'n/a'
+$java_major = 0
 if (-not $env:ANDROID_HOME) {
     $env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
 }
@@ -58,9 +60,28 @@ if (-not $env:JAVA_HOME -and -not (Get-Command java -ErrorAction SilentlyContinu
 if ($env:JAVA_HOME) {
     $env:PATH = (Join-Path $env:JAVA_HOME 'bin') + [IO.Path]::PathSeparator + $env:PATH
 }
+# `java -version` 打到 stderr，且首行形如 `openjdk version "21.0.5" 2024-10-15`。
+$javaVersionLine = (& java -version 2>&1 | Select-Object -First 1)
+if ($javaVersionLine -match '(\d+)(\.(\d+))?') {
+    $java_major = [int]$Matches[1]
+    $java_version = $javaVersionLine.ToString().Trim()
+}
 Write-Host "SDK : $env:ANDROID_HOME"
 Write-Host "NDK : $env:ANDROID_NDK_ROOT"
-Write-Host "JAVA: $env:JAVA_HOME"
+Write-Host "JAVA: $env:JAVA_HOME ($java_version)"
+
+# Android Studio 更新会换掉自带的 jbr（JDK 版本）和 SDK 组件，先把前置条件摊开：
+# 失败时不用再去猜是 JDK 太新、还是 platform/build-tools 被移走了。
+if ($java_major -gt 23) {
+    Write-Warning "JDK $java_major 高于 Gradle 8.13 支持的上限（23）。Studio 更新后如果构建报 "Unsupported class file major version"，请把 `$env:JAVA_HOME 指回旧版 jbr，或把 GRADLE_HOME 换到 Gradle 8.14+。"
+}
+if (-not (Test-Path (Join-Path $env:ANDROID_HOME 'platforms/android-34'))) {
+    Write-Warning "缺少 SDK platform 34（compileSdk）。用 SDK Manager 装 platforms;android-34，或改 app/build.gradle.kts 的 compileSdk。"
+}
+$buildTools = Get-ChildItem (Join-Path $env:ANDROID_HOME 'build-tools') -Directory -ErrorAction SilentlyContinue
+if (-not $buildTools) {
+    Write-Warning "缺少 build-tools。用 SDK Manager 装 build-tools;34.0.0。"
+}
 
 # Gradle：优先环境变量里指定的，其次 PATH，最后用仓库里的 wrapper。
 $gradle = $null
