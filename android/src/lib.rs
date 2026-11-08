@@ -1,58 +1,52 @@
 //! Android 入口（`cdylib`）。
 //!
-//! 只做两件事：
+//! 只做平台胶水：算好目录、把系统输入法与文件选择器接上，然后把界面交给 `llt_gui`。
+//! 界面、下载解码、备份逻辑都在共用库里，这里不出现任何 UI 代码。
 //!
-//! 1. 把 APK 资源里的数据库（`assets/timetable/llt-timetable.sqlite`）解到应用私有目录
-//!    `/data/user/0/org.llt.timetable/files/`，下次启动比对版本标记，没变就直接复用；
-//! 2. 把数据库与配置文件的路径交给 `llt_gui` 启动界面。
-//!
-//! 界面、字体、查询逻辑全在 `llt-gui` 库里；这里不出现任何 UI 代码。
-//! 桌面端没有这个包（`android-main` 只由 Android 加载）。
+//! **APK 不内置数据库**（数据包 41 MB，随包发会让 APK 翻倍，而且版本很快过时）：
+//! 第一次启动时库不存在，界面会落在「数据」页引导用户下载或导入备份。
 
+mod files;
 mod ime;
 
-use std::ffi::CString;
-use std::fs;
-use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use android_activity::AndroidApp;
-use android_activity::ndk::asset::{Asset, AssetManager};
+use jni::objects::JObject;
 use jni::sys::jint;
 
-/// APK 里数据库与版本标记的位置（相对 `assets/` 根）。
-const DB_ASSET: &str = "timetable/llt-timetable.sqlite";
-const VERSION_ASSET: &str = "timetable/version";
-/// 输入法桥的 dex（`build.ps1` 编译 `java/` 得到，打进 assets）。
-const IME_DEX_ASSET: &str = "ime.dex";
-
-/// 解到应用私有目录后的文件名。
+/// 私有目录里的文件名。
 const DB_FILE: &str = "llt-timetable.sqlite";
-const VERSION_FILE: &str = "llt-timetable.version";
 const CONFIG_FILE: &str = "llt-gui.json";
 
 /// android-activity 规定的入口名，由 `NativeActivity` 在新线程里调用。
 ///
 /// `eprintln!` 已经被 android-activity 重定向到 logcat，出问题用
-/// `adb logcat | Select-String llt` 就能看到。
+/// `adb logcat -s RustStdoutStderr` 就能看到。
 #[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {
-    // 私有目录由系统创建，取不到就退回当前目录（只影响数据库/配置的落点）。
-    let files = app
-        .internal_data_path()
-        .unwrap_or_else(|| PathBuf::from("."));
-    let db_path = files.join(DB_FILE);
-    if let Err(err) = install_db(&app, &files, &db_path) {
-        // 不中止启动：界面会显示「找不到数据库」的错误页，至少能看清是哪一步坏了。
-        eprintln!("准备数据库失败：{err}");
-    }
+    let files_dir = app.internal_data_path().unwrap_or_else(|| {
+        eprintln!("取不到私有目录，数据库与配置将落在当前目录");
+        PathBuf::from(".")
+    });
+    let db_path = files_dir.join(DB_FILE);
+    let config_path = files_dir.join(CONFIG_FILE);
+
+    // 目录约定：
+    // - 库和配置在私有目录（filesDir），不需要任何权限；
+    // - 备份的导入/导出走系统文件选择器，Java 侧临时拷到 filesDir/import；
+    // - 临时目录用 cacheDir（Android 没有可写的 /tmp）。
+    let cache_dir = cache_dir(&app).unwrap_or_else(|| files_dir.join("cache"));
+    let import_dir = files_dir.join("import");
+    let _ = std::fs::create_dir_all(&import_dir);
 
     let options = eframe::NativeOptions {
         android_app: Some(app.clone()),
         ..llt_gui::options()
     };
-    // 缩进用回调：窗口刚创建时 `getRootWindowInsets()` 还是 null，软键盘的
-    // 弹出 / 收起也会改变它，所以界面会反复问（见 `llt_gui::Insets`）。
+
+    // 系统栏缩进用回调：窗口刚创建时 `getRootWindowInsets()` 还是 null，
+    // 软键盘弹出 / 收起也会改变它（见 `llt_gui::Insets`）。
     let last = std::sync::Mutex::new(llt_gui::ScreenInsets::default());
     let probe_app = app.clone();
     let insets = llt_gui::Insets::probe(move || {
@@ -65,19 +59,59 @@ fn android_main(app: AndroidApp) {
         }
         found
     });
+
     // 输入法桥：NativeActivity 没有 InputConnection，中文要自己接（见 `ime.rs`）。
-    // dex 读不出来不中止启动：界面照常起来，只是打不了中文。
-    let ime_dex = read_asset(&app.asset_manager(), IME_DEX_ASSET).ok();
-    let ime = ime::attach(&app, ime_dex.as_deref());
+    let ime = ime::attach(&app);
+    // 文件选择器：导入/导出备份要弹系统的 SAF（见 `files.rs` 与 MainActivity）。
+    let picker = files::attach(&app);
+
     let platform = llt_gui::Platform {
         insets,
         ime: ime.map(|bridge| bridge as std::sync::Arc<dyn llt_gui::ImeBridge>),
         // 触屏：控件与行高用大一号的一套，点击热区也放宽。
         pointer: llt_gui::theme::Pointer::Touch,
+        dirs: llt_gui::data::DataDirs {
+            import: import_dir.clone(),
+            export: import_dir,
+            temp: cache_dir,
+        },
+        files: picker.map(|picker| picker as std::sync::Arc<dyn llt_gui::files::FilePicker>),
     };
-    if let Err(err) = llt_gui::run_with(options, db_path, files.join(CONFIG_FILE), platform) {
+
+    if let Err(err) = llt_gui::run_with(options, db_path, config_path, platform) {
         eprintln!("界面启动失败：{err}");
     }
+}
+
+/// 应用 cache 目录（与 files 同级）。
+///
+/// 直接问 Java 的 `getCacheDir()`：android-activity 只给了 `internal_data_path()`。
+fn cache_dir(app: &AndroidApp) -> Option<PathBuf> {
+    let text = with_activity_string(app, "getCacheDir").ok()??;
+    // `getCacheDir()` 返回 File，先取路径字符串再包成 PathBuf。
+    Some(PathBuf::from(text))
+}
+
+/// 调 Activity 上返回 `File` 的无参方法，拿到绝对路径。
+fn with_activity_string(app: &AndroidApp, method: &str) -> jni::errors::Result<Option<String>> {
+    // SAFETY: `android_main` 期间 Activity 指针由 android-activity 保证有效。
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }?;
+    let mut env = vm.attach_current_thread()?;
+    let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
+    let file = env
+        .call_method(&activity, method, "()Ljava/io/File;", &[])?
+        .l()?;
+    if file.is_null() {
+        return Ok(None);
+    }
+    let path = env
+        .call_method(&file, "getAbsolutePath", "()Ljava/lang/String;", &[])?
+        .l()?;
+    if path.is_null() {
+        return Ok(None);
+    }
+    let text: String = env.get_string(&jni::objects::JString::from(path))?.into();
+    Ok(Some(text))
 }
 
 /// 读取状态栏 / 导航栏 / 软键盘占的像素宽度。
@@ -95,7 +129,7 @@ fn read_insets(app: &AndroidApp) -> Option<llt_gui::ScreenInsets> {
     // SAFETY: android-activity 保证这两个指针在 android_main 期间有效。
     let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }.ok()?;
     let mut env = vm.attach_current_thread().ok()?;
-    let activity = unsafe { jni::objects::JObject::from_raw(app.activity_as_ptr().cast()) };
+    let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
 
     let window = env
         .call_method(&activity, "getWindow", "()Landroid/view/Window;", &[])
@@ -161,67 +195,4 @@ fn ime_inset(env: &mut jni::JNIEnv<'_>, window_insets: &jni::objects::JObject<'_
         env.get_field(&insets, "bottom", "I")?.i()
     };
     read().unwrap_or(0).max(0) as u32
-}
-
-/// 保证私有目录里有一份与 APK 同版本的数据库。
-///
-/// 只比较版本标记（`assets/timetable/version` 与本地 `llt-timetable.version`），
-/// 不做哈希：数据包 41 MB，每次启动算一遍校验和是没必要的开销。
-fn install_db(app: &AndroidApp, dir: &Path, db: &Path) -> io::Result<()> {
-    let assets = app.asset_manager();
-
-    let wanted = String::from_utf8_lossy(&read_asset(&assets, VERSION_ASSET)?)
-        .trim()
-        .to_owned();
-    if wanted.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("APK 里的 {VERSION_ASSET} 是空的"),
-        ));
-    }
-
-    let marker = dir.join(VERSION_FILE);
-    let installed = fs::read_to_string(&marker)
-        .map(|text| text.trim().to_owned())
-        .unwrap_or_default();
-    if db.is_file() && installed == wanted {
-        return Ok(());
-    }
-
-    fs::create_dir_all(dir)?;
-    // 先写 `*.tmp` 再改名：中途被杀掉也不会留下半个数据库被 SQLite 当成坏库。
-    let tmp = db.with_extension("sqlite.tmp");
-    let copied = (|| -> io::Result<()> {
-        let mut asset = open_asset(&assets, DB_ASSET)?;
-        let mut out = fs::File::create(&tmp)?;
-        io::copy(&mut asset, &mut out)?;
-        out.sync_all()
-    })();
-    if let Err(err) = copied {
-        let _ = fs::remove_file(&tmp);
-        return Err(err);
-    }
-    fs::rename(&tmp, db)?;
-    fs::write(&marker, &wanted)?;
-    eprintln!("已从 APK 解出数据库 {wanted} -> {}", db.display());
-    Ok(())
-}
-
-fn open_asset(assets: &AssetManager, name: &str) -> io::Result<Asset> {
-    let c_name = CString::new(name).map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidInput, format!("资源名有 NUL：{name}"))
-    })?;
-    assets.open(&c_name).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("APK 里没有 {name}（打包时漏了 assets？见 docs/android.md）"),
-        )
-    })
-}
-
-fn read_asset(assets: &AssetManager, name: &str) -> io::Result<Vec<u8>> {
-    let mut asset = open_asset(assets, name)?;
-    let mut bytes = Vec::with_capacity(asset.length());
-    asset.read_to_end(&mut bytes)?;
-    Ok(bytes)
 }

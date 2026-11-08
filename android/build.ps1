@@ -1,26 +1,25 @@
 <#
 .SYNOPSIS
-    把 llt-gui 打成 Android APK（cargo apk）。
+    把 llt-gui 打成 Android APK（cargo ndk + Gradle）。
 
 .DESCRIPTION
     步骤：
-      1. 检查 out/timetable/llt-timetable.sqlite（没有就先 `cargo run -p llt --release -- build`）；
-      2. 把数据库和版本标记复制到 android/assets/timetable/（打包时进 APK）；
-      3. 编译 java/ 下的输入法桥（ImeBridge）成 assets/ime.dex——清单里是
-         `hasCode=false`（cargo-apk 的 native 应用就是这样），应用自己的 ClassLoader
-         是空的，所以这个 dex 由 Rust 侧用 InMemoryDexClassLoader 在运行时装进去；
-      4. 用 cargo apk 交叉编译并打包。
+      1. Rust cdylib：`cargo ndk` 交叉编译 `android/` 这个包，产物直接放进
+         `app/src/main/jniLibs/<abi>/`；
+      2. Java + 打包：Gradle（AGP）编 `MainActivity` / `ImeBridge`、合并清单、打 APK；
+      3. release 包需要签名：没有证书就用 keytool 生成 `keystore/llt-release.jks`。
 
-    需要：Rust 的 aarch64-linux-android / x86_64-linux-android target、
-    Android SDK（$env:ANDROID_HOME 或默认的 %LOCALAPPDATA%\Android\Sdk）、
-    SDK 里的 NDK（$env:ANDROID_NDK_ROOT，未设置时取 ndk/ 下最新一版）、
-    cargo-apk（cargo install cargo-apk）、JDK（javac / keytool / d8 / apksigner 都要 java）。
+    APK **不内置数据库**：41 MB 的数据包不随包发，第一次启动在「数据」页下载或导入。
+
+    需要：Rust 的 aarch64-linux-android / x86_64-linux-android target、Android SDK
+    （$env:ANDROID_HOME）、SDK 里的 NDK（$env:ANDROID_NDK_ROOT）、JDK 17+
+    （$env:JAVA_HOME）、cargo-ndk、Gradle 8.9+（$env:GRADLE_HOME 或 PATH）。
 
 .PARAMETER Release
-    用 release 配置构建（默认 debug，装到设备上更慢但编译快）。
+    用 release 配置（默认 debug）。
 
-.PARAMETER SkipAssets
-    不刷新 assets（数据库没变时省一次 41 MB 复制）。
+.PARAMETER SkipRust
+    跳过 `cargo ndk`（.so 没变时省一次交叉编译）。
 
 .EXAMPLE
     pwsh -File android/build.ps1 -Release
@@ -28,16 +27,11 @@
 [CmdletBinding()]
 param(
     [switch]$Release,
-    [switch]$SkipAssets
+    [switch]$SkipRust
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-
-$root = Split-Path -Parent $PSScriptRoot
-$outDir = Join-Path $root 'out/timetable'
-$dbFile = Join-Path $outDir 'llt-timetable.sqlite'
-$metaFile = Join-Path $outDir 'meta.json'
 
 # —— 环境 ——
 if (-not $env:ANDROID_HOME) {
@@ -54,10 +48,6 @@ if (-not $env:ANDROID_NDK_ROOT) {
     }
     $env:ANDROID_NDK_ROOT = $ndkDirs[0].FullName
 }
-Write-Host "SDK : $env:ANDROID_HOME"
-Write-Host "NDK : $env:ANDROID_NDK_ROOT"
-
-# apksigner / 打包工具是 .bat，要能找到 java。
 if (-not $env:JAVA_HOME -and -not (Get-Command java -ErrorAction SilentlyContinue)) {
     $jbr = Join-Path $env:ProgramFiles 'Android/Android Studio/jbr'
     if (-not (Test-Path (Join-Path $jbr 'bin/java.exe'))) {
@@ -67,64 +57,42 @@ if (-not $env:JAVA_HOME -and -not (Get-Command java -ErrorAction SilentlyContinu
 }
 if ($env:JAVA_HOME) {
     $env:PATH = (Join-Path $env:JAVA_HOME 'bin') + [IO.Path]::PathSeparator + $env:PATH
-    Write-Host "JAVA: $env:JAVA_HOME"
 }
+Write-Host "SDK : $env:ANDROID_HOME"
+Write-Host "NDK : $env:ANDROID_NDK_ROOT"
+Write-Host "JAVA: $env:JAVA_HOME"
 
-# —— 数据库 ——
-if (-not (Test-Path $dbFile)) {
-    throw "找不到 $dbFile，先运行：cargo run -p llt --release -- build"
+# Gradle：优先环境变量里指定的，其次 PATH，最后用仓库里的 wrapper。
+$gradle = $null
+if ($env:GRADLE_HOME) {
+    $candidate = Join-Path $env:GRADLE_HOME 'bin/gradle.bat'
+    if (Test-Path $candidate) { $gradle = $candidate }
 }
-if (-not $SkipAssets) {
-    $assets = Join-Path $PSScriptRoot 'assets/timetable'
-    New-Item -ItemType Directory -Force $assets | Out-Null
-    Copy-Item $dbFile (Join-Path $assets 'llt-timetable.sqlite') -Force
-
-    # 版本标记：界面里显示的「数据 2026-11-08」也来自同一份 meta.json。
-    $version = (Get-Content $metaFile -Raw | ConvertFrom-Json).data_version
-    if (-not $version) { throw "$metaFile 里没有 data_version" }
-    Set-Content (Join-Path $assets 'version') $version -NoNewline -Encoding utf8
-    Write-Host "assets: $version + $((Get-Item (Join-Path $assets 'llt-timetable.sqlite')).Length / 1MB) MB"
+if (-not $gradle) {
+    $onPath = Get-Command gradle -ErrorAction SilentlyContinue
+    if ($onPath) { $gradle = $onPath.Source }
 }
+if (-not $gradle) {
+    $wrapper = Join-Path $PSScriptRoot 'gradlew.bat'
+    if (Test-Path $wrapper) { $gradle = $wrapper }
+}
+if (-not $gradle) {
+    throw "找不到 Gradle 8.9+：设置 `$env:GRADLE_HOME，或把 gradle 加进 PATH"
+}
+Write-Host "GRADLE: $gradle"
 
-# —— 输入法桥的 dex ——
-# cargo-apk 直接编译 NativeActivity 应用（清单 hasCode=false），塞 classes.dex 进 APK
-# 也没用：应用自己的 ClassLoader 是空的，loadClass 一律 ClassNotFoundException。
-# 所以把 dex 放进 assets，运行时用 InMemoryDexClassLoader（API 26+）装进来。
-$buildTools = Get-ChildItem (Join-Path $env:ANDROID_HOME 'build-tools') -Directory |
-    Sort-Object Name -Descending | Select-Object -First 1
-if (-not $buildTools) { throw "找不到 build-tools（SDK Manager 里装 build-tools;34.x）" }
-$platforms = Get-ChildItem (Join-Path $env:ANDROID_HOME 'platforms') -Directory |
-    Sort-Object Name -Descending
-$androidJar = Join-Path $platforms[0].FullName 'android.jar'
-if (-not (Test-Path $androidJar)) { throw "找不到 $androidJar（SDK Manager 里装 platforms;android-34）" }
-
-$classDir = Join-Path $PSScriptRoot 'target/ime-classes'
-$dexDir = Join-Path $PSScriptRoot 'target/ime-dex'
-Remove-Item $classDir, $dexDir -Recurse -Force -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force $classDir, $dexDir | Out-Null
-
-# 数组要用 @() 包住再 @ 展开：只有一个文件时 .FullName 是字符串，@ 展开会拆成字符。
-$sources = @(Get-ChildItem (Join-Path $PSScriptRoot 'java') -Recurse -Filter *.java |
-    Select-Object -ExpandProperty FullName)
-if ($sources.Count -eq 0) { throw "java/ 下没有 .java（输入法桥丢了？）" }
-Write-Host "javac -> $classDir"
-& javac -encoding utf-8 --release 11 -classpath $androidJar -d $classDir @sources
-if ($LASTEXITCODE -ne 0) { throw "javac 失败（exit $LASTEXITCODE）" }
-
-$classes = @(Get-ChildItem $classDir -Recurse -Filter *.class |
-    Select-Object -ExpandProperty FullName)
-& (Join-Path $buildTools.FullName 'd8.bat') --release --min-api 26 `
-    --lib $androidJar --output $dexDir @classes
-if ($LASTEXITCODE -ne 0) { throw "d8 失败（exit $LASTEXITCODE）" }
-
-$imeDex = Join-Path $PSScriptRoot 'assets/ime.dex'
-Copy-Item (Join-Path $dexDir 'classes.dex') $imeDex -Force
-Write-Host "输入法桥：assets/ime.dex ($([math]::Round((Get-Item $imeDex).Length / 1KB, 1)) KB)"
-
-# —— 打包 ——
 Push-Location $PSScriptRoot
 try {
-    # release 包需要签名：没有证书就用 keytool 生成一份自用证书（见 Cargo.toml 的 signing.release）。
+    # —— 1) Rust .so ——
+    if (-not $SkipRust) {
+        $cargoArgs = @('ndk', '-t', 'arm64-v8a', '-t', 'x86_64', '-o', 'app/src/main/jniLibs', 'build')
+        if ($Release) { $cargoArgs += '--release' }
+        Write-Host "cargo $($cargoArgs -join ' ')"
+        & cargo @cargoArgs
+        if ($LASTEXITCODE -ne 0) { throw "cargo ndk 失败（exit $LASTEXITCODE）" }
+    }
+
+    # —— 2) 签名证书（只有 release 需要） ——
     $keystore = Join-Path $PSScriptRoot 'keystore/llt-release.jks'
     if ($Release -and -not (Test-Path $keystore)) {
         New-Item -ItemType Directory -Force (Split-Path -Parent $keystore) | Out-Null
@@ -134,18 +102,15 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "keytool 生成证书失败（exit $LASTEXITCODE）" }
     }
 
-    $apkArgs = @('apk', 'build')
-    if ($Release) { $apkArgs += '--release' }
-    Write-Host "cargo $($apkArgs -join ' ')"
-    & cargo @apkArgs
-    if ($LASTEXITCODE -ne 0) { throw "cargo apk 失败（exit $LASTEXITCODE）" }
+    # —— 3) Gradle 打包 ——
+    $task = if ($Release) { 'assembleRelease' } else { 'assembleDebug' }
+    Write-Host "gradle $task"
+    & $gradle $task --console=plain
+    if ($LASTEXITCODE -ne 0) { throw "gradle 失败（exit $LASTEXITCODE）" }
 
-    $profile = if ($Release) { 'release' } else { 'debug' }
-    $apk = Join-Path $PSScriptRoot "target/$profile/apk/llt-gui.apk"
-    if (-not (Test-Path $apk)) {
-        throw "没找到 $apk，检查 cargo apk 的输出"
-    }
-
+    $variant = if ($Release) { 'release' } else { 'debug' }
+    $apk = Join-Path $PSScriptRoot "app/build/outputs/apk/$variant/app-$variant.apk"
+    if (-not (Test-Path $apk)) { throw "没找到 $apk" }
     $size = [math]::Round((Get-Item $apk).Length / 1MB, 1)
     Write-Host "APK : $apk ($size MB)"
     Write-Host "安装：adb install -r `"$apk`""

@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, RichText, Ui};
 
 use lltdata::local::LocalState;
+
+use crate::files::{FileEvent, FilePicker};
 use lltdata::{Decision, Options, Progress, RemoteVersion};
 
 use crate::{config, theme};
@@ -156,6 +158,10 @@ struct BackupEntry {
 /// 「数据」页的全部状态。
 pub struct DataPage {
     dirs: DataDirs,
+    /// 系统文件选择器（Android）；`None` 时导入导出直接读写 [`DataDirs`]。
+    picker: Option<Arc<dyn FilePicker>>,
+    /// 是否已经把界面句柄交给选择器（只有 Android 需要）。
+    picker_attached: bool,
     /// 当前库的状态快照（每次刷新/任务结束重读）。
     local: Option<LocalState>,
     /// 线上版本（检查过才有）。
@@ -178,9 +184,11 @@ pub struct DataPage {
 const SCAN_INTERVAL: Duration = Duration::from_secs(3);
 
 impl DataPage {
-    pub fn new(dirs: DataDirs) -> Self {
+    pub fn new(dirs: DataDirs, picker: Option<Arc<dyn FilePicker>>) -> Self {
         Self {
             dirs,
+            picker,
+            picker_attached: false,
             local: None,
             remote: None,
             task: None,
@@ -202,6 +210,11 @@ impl DataPage {
         self.scan_backups();
     }
 
+    /// 当前库的数据版本（导出文件名用）。
+    fn data_version(&self) -> Option<&str> {
+        self.local.as_ref()?.data_version.as_deref()
+    }
+
     /// 有任务在跑时，别的会改库的按钮都要禁用。
     pub fn busy(&self) -> bool {
         self.task.is_some()
@@ -210,6 +223,7 @@ impl DataPage {
     /// 画这一页。返回是否需要重开数据库。
     pub fn ui(&mut self, ui: &mut Ui, db_path: &Path) -> DataOutcome {
         let mut outcome = DataOutcome::default();
+        self.pump_picker(ui.ctx(), db_path, &mut outcome);
         self.poll_task(db_path, &mut outcome);
         if self
             .scanned_at
@@ -363,19 +377,17 @@ impl DataPage {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP_S;
             if button(ui, "导出备份").clicked() && !busy {
-                self.start_export(ui.ctx(), db_path);
+                self.export_backup(ui.ctx(), db_path);
             }
             if button(ui, "导入备份").clicked() && !busy {
-                self.scan_backups();
-                if self.backups.is_empty() {
-                    self.notice = Some(Notice {
-                        ok: false,
-                        text: format!("{} 下没有可导入的 .sqlite 备份", self.dirs.import.display()),
-                    });
-                }
+                self.pick_backup(ui.ctx());
             }
         });
-        ui.label(meta(format!("导入目录：{}", self.dirs.import.display())));
+        if self.picker.is_some() {
+            ui.label(meta("导入会弹系统文件选择器；导出由你决定存到哪。"));
+        } else {
+            ui.label(meta(format!("导入目录：{}", self.dirs.import.display())));
+        }
 
         if let Some(path) = self.pending_import.clone() {
             ui.add_space(theme::GAP_S);
@@ -514,6 +526,51 @@ impl DataPage {
         });
     }
 
+    /// 「导出备份」：有选择器就交给系统（用户选位置），否则写到备份目录。
+    fn export_backup(&mut self, ctx: &egui::Context, db_path: &Path) {
+        match self.picker.clone() {
+            Some(picker) => {
+                if db_path.is_file() {
+                    let name = backup_name(self.data_version(), None);
+                    picker.request_export(db_path, &name);
+                } else {
+                    self.notice = Some(Notice {
+                        ok: false,
+                        text: "当前没有可导出的数据库".to_owned(),
+                    });
+                }
+            }
+            None => self.start_export(ctx, db_path),
+        }
+    }
+
+    /// 「导入备份」：有选择器就弹系统选择器，否则扫描导入目录让用户挑。
+    fn pick_backup(&mut self, ctx: &egui::Context) {
+        match self.picker.clone() {
+            Some(picker) => {
+                let dir = self.dirs.import.clone();
+                if let Err(err) = std::fs::create_dir_all(&dir) {
+                    self.notice = Some(Notice {
+                        ok: false,
+                        text: format!("无法准备导入目录 {}：{err}", dir.display()),
+                    });
+                    return;
+                }
+                picker.request_import(&dir);
+                // 选择器开着的时候界面会一直等，催一帧让「取消」也能被画出来。
+                ctx.request_repaint_after(Duration::from_millis(250));
+            }
+            None => {
+                self.scan_backups();
+                if self.backups.is_empty() {
+                    let text =
+                        format!("{} 下没有可导入的 .sqlite 备份", self.dirs.import.display());
+                    self.notice = Some(Notice { ok: false, text });
+                }
+            }
+        }
+    }
+
     fn start_export(&mut self, ctx: &egui::Context, db_path: &Path) {
         let source = db_path.to_path_buf();
         let target_dir = self.dirs.export.clone();
@@ -556,6 +613,46 @@ impl DataPage {
             progress,
             result: rx,
         });
+    }
+
+    /// 收系统文件选择器的结果。
+    ///
+    /// 平台侧只负责把字节搬到位：导入时已经把文件复制到导入目录，这里拿到的是一条
+    /// 本地路径，走的是与「目录里挑一份」完全相同的校验与替换流程。
+    fn pump_picker(&mut self, ctx: &egui::Context, db_path: &Path, _outcome: &mut DataOutcome) {
+        let Some(picker) = self.picker.clone() else {
+            return;
+        };
+        if !self.picker_attached {
+            picker.attach_context(ctx);
+            self.picker_attached = true;
+        }
+        for event in picker.drain() {
+            match event {
+                FileEvent::Imported(path) => {
+                    // 不直接相信选择器给的文件：仍按备份校验，顺便沿用自动备份。
+                    self.start_import(ctx, db_path, path);
+                }
+                FileEvent::Exported(target) => {
+                    self.notice = Some(Notice {
+                        ok: true,
+                        text: format!("已导出到 {target}"),
+                    });
+                }
+                FileEvent::Cancelled => {
+                    self.notice = Some(Notice {
+                        ok: true,
+                        text: "已取消".to_owned(),
+                    });
+                }
+                FileEvent::Failed(err) => {
+                    self.notice = Some(Notice {
+                        ok: false,
+                        text: err,
+                    });
+                }
+            }
+        }
     }
 
     /// 取走后台任务的结果。
@@ -669,10 +766,7 @@ fn export_backup(
     }
     std::fs::create_dir_all(target_dir)
         .with_context(|| format!("无法创建导出目录 {}", target_dir.display()))?;
-    let stamp = jiff::Zoned::now().strftime("%Y%m%d-%H%M").to_string();
-    let version = data_version.unwrap_or("noversion");
-    let name = format!("llt-timetable-{version}-{stamp}.sqlite");
-    let target = target_dir.join(name);
+    let target = target_dir.join(backup_name(data_version, None));
     let tmp = target.with_extension("sqlite.tmp");
     std::fs::copy(source, &tmp).with_context(|| format!("无法写入 {}", tmp.display()))?;
     std::fs::rename(&tmp, &target).with_context(|| format!("无法写入 {}", target.display()))?;
@@ -714,6 +808,15 @@ fn import_backup(source: &Path, target: &Path, backup_dir: &Path) -> anyhow::Res
         file_name(source),
         state.data_version.as_deref().unwrap_or("未知")
     ))
+}
+
+/// 备份文件名：`llt-timetable-<数据版本>-<时间>.sqlite`。
+fn backup_name(data_version: Option<&str>, stamp: Option<&str>) -> String {
+    let version = data_version.unwrap_or("noversion");
+    let stamp = stamp
+        .map(str::to_owned)
+        .unwrap_or_else(|| jiff::Zoned::now().strftime("%Y%m%d-%H%M").to_string());
+    format!("llt-timetable-{version}-{stamp}.sqlite")
 }
 
 fn is_sqlite(path: &Path) -> bool {

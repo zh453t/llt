@@ -214,7 +214,7 @@ impl LltApp {
 
         // 配置读取失败只降级，不阻断启动：返回默认值 + 一句提示。
         let (settings, config_warning) = config::load(&config_path);
-        let data_page = crate::data::DataPage::new(platform.dirs.clone());
+        let data_page = crate::data::DataPage::new(platform.dirs.clone(), platform.files.clone());
         let mut app = Self {
             db: None,
             data: data_page,

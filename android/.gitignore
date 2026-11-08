@@ -1,4 +1,11 @@
+# Rust 与 Gradle 的产物
 /target
-# assets 由 build.ps1 从 out/timetable 复制，本身有 .gitignore
+/app/build
+/build
+/.gradle
+/.kotlin
+/local.properties
 # 自用签名证书（build.ps1 -Release 首次运行时生成）
 /keystore
+# cargo ndk 输出的 .so（每次构建重新生成）
+/app/src/main/jniLibs

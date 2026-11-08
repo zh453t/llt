@@ -7,6 +7,7 @@
 mod app;
 pub mod config;
 pub mod data;
+pub mod files;
 pub mod fonts;
 pub mod theme;
 
@@ -111,8 +112,9 @@ pub trait ImeBridge: Send + Sync {
 
 /// 平台差异的唯一入口：界面只认这个结构体，不再各自传参。
 ///
-/// 桌面与 Android 的差别全在这里：系统栏缩进、系统输入法、指针类型。以后再加
-/// 平台能力（剪贴板、返回键）加字段即可，`run_with` 与 `LltApp::new` 不必再改签名。
+/// 桌面与 Android 的差别全在这里：系统栏缩进、系统输入法、指针类型、数据目录、
+/// 文件选择器。以后再加平台能力（剪贴板、返回键）加字段即可，`run_with` 与
+/// `LltApp::new` 不必再改签名。
 pub struct Platform {
     /// 系统栏（状态栏 / 导航栏 / 刘海 / 软键盘）占的像素；桌面恒为 0。
     pub insets: Insets,
@@ -122,6 +124,8 @@ pub struct Platform {
     pub pointer: theme::Pointer,
     /// 数据页用的目录（导入备份、导出备份、构建临时目录）。
     pub dirs: data::DataDirs,
+    /// 系统文件选择器；桌面是 `None`（直接读写目录）。
+    pub files: Option<Arc<dyn files::FilePicker>>,
 }
 
 impl Platform {
@@ -140,6 +144,7 @@ impl Platform {
             ime: None,
             pointer,
             dirs: data::DataDirs::beside_exe(),
+            files: None,
         }
     }
 }
