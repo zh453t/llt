@@ -291,9 +291,12 @@ impl DataPage {
             None => {
                 ui.label(body(format!("还没有数据（{}）", db_path.display())));
                 ui.label(meta("下载一份，或从备份里导入。"));
-                ui.label(meta(
-                    "也可以指定路径：llt-gui --db <path>，或环境变量 LLT_DB。",
-                ));
+                if self.picker.is_none() {
+                    // 桌面（绿色版）才有命令行入口，Android 上没有 argv。
+                    ui.label(meta(
+                        "也可以指定路径：llt-gui --db <path>，或环境变量 LLT_DB。",
+                    ));
+                }
             }
         }
 
@@ -443,16 +446,27 @@ impl DataPage {
     }
 
     fn notes_ui(&mut self, ui: &mut Ui) {
-        if self.backups.is_empty() && self.notice.is_none() && self.task.is_none() {
-            return;
-        }
         heading(ui, "说明");
-        ui.label(meta(format!(
-            "导出的备份写在 {}；把它拷回这里就能导入。",
-            self.dirs.export.display()
-        )));
+        match self.picker {
+            // 有系统选择器：存哪儿由用户决定，说清楚流程就行。
+            Some(_) => {
+                ui.label(meta(
+                    "导出会弹系统的「保存到」，自己选存哪（下载、网盘、U 盘都行）。",
+                ));
+                ui.label(meta(
+                    "导入会弹文件选择器；导入前会把当前库另存一份到应用目录。",
+                ));
+            }
+            // 桌面：备份都在可执行文件旁。
+            None => {
+                ui.label(meta(format!(
+                    "导出的备份写在 {}；把它拷回这里就能导入。",
+                    self.dirs.export.display()
+                )));
+            }
+        }
         ui.label(meta(
-            "下载会占用约 90 MB 临时空间（2.3 MB 数据包 + 解包 + 40 MB 新库）。",
+            "下载会占用约 90 MB 临时空间（2.3 MB 数据包 + 解包 + 42 MB 新库）。",
         ));
     }
 

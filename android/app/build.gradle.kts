@@ -15,7 +15,9 @@ android {
         applicationId = "org.llt.timetable"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
+        // 旧的 cargo-apk 包用的是 16777472 这类大数，这里按日期递增，
+        // 保证能覆盖安装（`INSTALL_FAILED_VERSION_DOWNGRADE` 的教训）。
+        versionCode = 2026110801
         versionName = "0.1.0"
         // 只打这两个 ABI：真机（arm64）与模拟器（x86_64）。
         ndk {
