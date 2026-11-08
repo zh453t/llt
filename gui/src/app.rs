@@ -873,7 +873,7 @@ impl LltApp {
             (Tab::Data, "设置"),
         ];
         let entered = self.tab;
-        let height = theme::control_height();
+        let height = theme::bar_height();
         ui.columns(tabs.len(), |columns| {
             for (index, (tab, label)) in tabs.iter().enumerate() {
                 let column = &mut columns[index];
@@ -1126,13 +1126,16 @@ impl LltApp {
             self.station_results_ui(ui, bar);
             return;
         }
-        let width = ui.available_width();
-        let field_width = (width * 0.34).clamp(140.0, 240.0);
         let mut clear = false;
         let mut changed = false;
-        ui.horizontal_wrapped(|ui| {
+        // 不换行：车站标签 + 输入框 + 模糊 + 日期 必须并排（换行说明宽度算多了）。
+        ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP_S;
             ui.label(RichText::new("车站").size(theme::FONT_BODY));
+            // 输入框宽度按「剩下的宽度 − 模糊 − 日期 − 间距」现算；96 点刚好放 5 个汉字。
+            let rest = ui.available_width();
+            let reserve = 52.0 + 112.0 + theme::GAP_S * 2.0;
+            let field_width = (rest - reserve).clamp(90.0, 240.0);
             let response = ui.add(query_input(
                 &mut self.station_query,
                 "例如 北京 / 北京南",
@@ -1162,7 +1165,7 @@ impl LltApp {
             date_picker(ui, &mut self.dates.station, "station_date", false);
             if let Some(title) = self.station_board_for.as_ref().filter(|_| !bar) {
                 let text = if self.station_options.len() > 1 {
-                    if width >= 430.0 {
+                    if ui.available_width() >= 160.0 {
                         format!(
                             "{} · {} 站 · {} 趟经停",
                             title,
@@ -1496,26 +1499,15 @@ impl LltApp {
             self.od_results_ui(ui);
             return;
         }
-        // 竖屏一行放：模糊 + 出发框 + ⇌ + 到达框；横屏（侧栏）把模糊挪到下一行，
-        // 两个框因此能宽一些。站名最长 5 个汉字（5 × 15 点 = 75），下限仍取 96 点。
-        let landscape = part == TabPart::Controls;
+        // 输入行只放「出发框 ⇌ 到达框」（模糊挪到日期那一行，见下）。站名最长 5 个
+        // 汉字（5 × 15 点 = 75），所以输入框下限取 96 点。
         let swap_width = theme::control_height();
         let mut changed = false;
         // 触摸屏上「模糊 / 查询」在底栏（`od_bar`），这里只留两个输入框与交换按钮。
         let bar = self.bottom_bar();
-        // 这一行不换行：模糊 + 出发 + ⇌ + 到达 必须并排（换行会让到达框单独掉到下一行）。
+        // 这一行不换行：出发 + ⇌ + 到达 必须并排（换行会让到达框单独掉到下一行）。
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP_S;
-            // 「模糊」在输入框左边（竖屏）：它是「怎么匹配输入」的开关，贴着输入最直观。
-            // 横屏的侧栏窄，它挪到输入框下面一行（见下面的 `if landscape`）。
-            if !landscape {
-                let fuzzy = ui
-                    .checkbox(&mut self.od_fuzzy, meta("模糊"))
-                    .on_hover_text("模糊搜索：出发/到达按城市或同城组匹配所有车站");
-                if fuzzy.changed() {
-                    changed = true;
-                }
-            }
             // 输入框宽度按「模糊之后还剩多少」现算：侧栏（横屏左栏）本来就窄，
             // 用估算常量会算多半行，到达框就被挤到下一行去了。
             // TextEdit 的 `desired_width` 不含它自己的左右内边距（合计约 8 点），
@@ -1576,16 +1568,18 @@ impl LltApp {
             }
         });
         ui.add_space(theme::GAP_XS);
-        // 日期单独一行：放在输入框下面、车站筛选上面（竖屏与侧栏都这样）。
-        ui.horizontal(|ui| date_picker(ui, &mut self.dates.od, "od_date", true));
-        if landscape
-            && ui
-                .checkbox(&mut self.od_fuzzy, meta("模糊"))
+        // 日期 + 「模糊站名」同一行：放在输入框下面、车站筛选上面（竖屏与侧栏都一样）。
+        ui.horizontal(|ui| {
+            date_picker(ui, &mut self.dates.od, "od_date", true);
+            ui.add_space(theme::GAP_S);
+            if ui
+                .checkbox(&mut self.od_fuzzy, meta("模糊站名"))
                 .on_hover_text("模糊搜索：出发/到达按城市或同城组匹配所有车站")
                 .changed()
-        {
-            changed = true;
-        }
+            {
+                changed = true;
+            }
+        });
         if changed {
             self.refresh_od();
         }
@@ -2680,7 +2674,7 @@ impl LltApp {
 
     /// 按车次的动作行：清空 + 计数。
     fn train_bar(&mut self, ui: &mut Ui) {
-        let height = theme::control_height();
+        let height = theme::bar_height() - 8.0;
         let has_query = !self.train_query.trim().is_empty();
         if has_query
             && ui
@@ -2701,7 +2695,7 @@ impl LltApp {
 
     /// 按车站的动作行：清空 / 模糊 + 计数。
     fn station_bar(&mut self, ui: &mut Ui) {
-        let height = theme::control_height();
+        let height = theme::bar_height() - 8.0;
         if !self.station_query.trim().is_empty()
             && ui
                 .add(egui::Button::new(meta("清空")).min_size(egui::vec2(0.0, height)))
@@ -2988,7 +2982,8 @@ fn time_cell(ui: &mut Ui, time: &str, offset_days: i64) {
     ui.spacing_mut().item_spacing.x = 2.0;
     ui.label(RichText::new(time).monospace());
     if offset_days > 0 {
-        ui.label(meta(format!("+{offset_days}天")).weak());
+        // 站站/车站结果表的列很窄，「+1」就够了（「天」在详情/表头里有说明）。
+        ui.label(meta(format!("+{offset_days}")).weak());
     }
 }
 

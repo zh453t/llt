@@ -83,6 +83,14 @@ pub fn control_height() -> f32 {
     }
 }
 
+/// 底栏按钮高度：比普通控件再高一点，拇指更容易点中（桌面跟控件同高）。
+pub fn bar_height() -> f32 {
+    match pointer() {
+        Pointer::Mouse => CONTROL_HEIGHT_MOUSE,
+        Pointer::Touch => CONTROL_HEIGHT_TOUCH + 6.0,
+    }
+}
+
 /// 查询结果列表行高。
 pub fn list_row_height() -> f32 {
     match pointer() {
@@ -134,8 +142,8 @@ pub fn detail_header_height() -> f32 {
 /// 滚动条宽度：触摸时拉宽，不然拖不住。
 pub fn scroll_bar_width() -> f32 {
     match pointer() {
-        Pointer::Mouse => 10.0,
-        Pointer::Touch => 14.0,
+        Pointer::Mouse => 5.0,
+        Pointer::Touch => 6.0,
     }
 }
 
@@ -317,6 +325,9 @@ fn apply_spacing(style: &mut egui::Style) {
     spacing.window_margin = Margin::same(12);
     spacing.menu_margin = Margin::same(8);
 
+    // 所有表格都用浮动细滚动条：平时不占位、几乎看不见，滚动/拖动时才浮出来。
+    // 粗滚动条在手机上一次要吃掉十几点宽度，而表格本来就紧。
+    spacing.scroll = egui::style::ScrollStyle::floating();
     let scroll = &mut spacing.scroll;
     scroll.bar_width = scroll_bar_width();
     scroll.floating_width = scroll_bar_width();
