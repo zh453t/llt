@@ -35,7 +35,7 @@ impl Tab {
             Tab::Od => "站站",
             Tab::Train => "车次",
             Tab::Station => "车站",
-            Tab::Data => "数据",
+            Tab::Data => "设置",
         }
     }
 }
@@ -75,6 +75,27 @@ enum FocusField {
     Station,
     OdFrom,
     OdTo,
+}
+
+/// 三个查询页各自的查询日期。
+///
+/// 分开存：站站常用「今天」，车次可能在看某天的具体车，车站可能翻到周末，
+/// 一个全局日期会让三个页面互相打架。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Dates {
+    od: Date,
+    train: Date,
+    station: Date,
+}
+
+impl Dates {
+    fn get(&self, tab: Tab) -> Date {
+        match tab {
+            Tab::Train => self.train,
+            Tab::Station => self.station,
+            _ => self.od,
+        }
+    }
 }
 
 /// 一个查询页要画哪一半。
@@ -145,7 +166,8 @@ pub struct LltApp {
     data_version: Option<i64>,
 
     tab: Tab,
-    date: Date,
+    /// 三个查询页各自的查询日期（互不影响，各自落盘）。
+    dates: Dates,
 
     train_query: String,
     train_results: Vec<TrainSummary>,
@@ -248,7 +270,11 @@ impl LltApp {
             data_version: None,
             // 上次停留的标签页；第一次启动是第一位（站站）。
             tab: settings.ui.tab,
-            date: today(),
+            dates: Dates {
+                od: settings.od.date.unwrap_or_else(today),
+                train: settings.train.date.unwrap_or_else(today),
+                station: settings.station.date.unwrap_or_else(today),
+            },
             train_query: settings.train.query.clone(),
             train_results: Vec::new(),
             station_query: settings.station.query.clone(),
@@ -413,15 +439,18 @@ impl LltApp {
             ui: config::UiSettings { tab: self.tab },
             train: config::TrainSettings {
                 query: self.train_query.clone(),
+                date: Some(self.dates.train),
             },
             station: config::StationSettings {
                 query: self.station_query.clone(),
                 fuzzy: self.station_fuzzy,
+                date: Some(self.dates.station),
             },
             od: config::OdSettings {
                 from: self.od_from.clone(),
                 to: self.od_to.clone(),
                 fuzzy: self.od_fuzzy,
+                date: Some(self.dates.od),
             },
             detail: config::DetailSettings {
                 via_stations_only: self.via_stations_only,
@@ -773,7 +802,7 @@ impl LltApp {
                     .size(title_size)
                     .family(fonts::bold_family()),
             );
-            if width > 700.0
+            if width > 300.0
                 && let Some(version) = self.data_version
             {
                 ui.add_space(theme::GAP_XS);
@@ -782,10 +811,7 @@ impl LltApp {
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 self.theme_button(ui);
-                if touch {
-                    ui.add_space(theme::GAP_S);
-                    self.date_picker(ui, false);
-                } else if width > 980.0 {
+                if !touch && width > 980.0 {
                     let file_name = self
                         .db_path
                         .file_name()
@@ -801,21 +827,7 @@ impl LltApp {
         }
 
         ui.add_space(theme::GAP_S);
-        let inline_date = ui.available_width() >= theme::INLINE_DATE_MIN_WIDTH;
-        ui.horizontal(|ui| {
-            self.tab_bar(ui);
-            // 宽屏时日期控件跟在标签页后面；窄屏单独一行，避免日期被换行拆散。
-            if inline_date {
-                ui.add_space(theme::GAP_M);
-                ui.separator();
-                ui.add_space(theme::GAP_M);
-                self.date_controls(ui);
-            }
-        });
-        if !inline_date {
-            ui.add_space(theme::GAP_XS);
-            ui.horizontal(|ui| self.date_controls(ui));
-        }
+        self.tab_bar(ui);
     }
 
     /// 标签页那一行。触摸窄屏与宽屏共用，只有日期控件的位置不同。
@@ -829,7 +841,7 @@ impl LltApp {
                 (Tab::Od, "站站"),
                 (Tab::Train, "车次"),
                 (Tab::Station, "车站"),
-                (Tab::Data, "数据"),
+                (Tab::Data, "设置"),
             ];
             let entered = self.tab;
             for (tab, label) in tabs {
@@ -858,7 +870,7 @@ impl LltApp {
             (Tab::Od, "站站"),
             (Tab::Train, "车次"),
             (Tab::Station, "车站"),
-            (Tab::Data, "数据"),
+            (Tab::Data, "设置"),
         ];
         let entered = self.tab;
         let height = theme::control_height();
@@ -894,41 +906,6 @@ impl LltApp {
         if ui.add(egui::Button::new(meta(label))).clicked() {
             ui.ctx().set_theme(next_theme);
         }
-    }
-
-    /// 只要日期选择控件本身（触摸窄屏并进标题行的紧凑版本）。
-    ///
-    /// `with_weekday` 为假时不画「周日」「今天」：那一行还要放主题按钮，
-    /// 星期从日期按钮的弹窗里也能看到。
-    fn date_picker(&mut self, ui: &mut Ui, with_weekday: bool) {
-        ui.add(
-            DatePickerButton::new(&mut self.date)
-                .id_salt("query_date")
-                .show_icon(false)
-                .highlight_weekends(false)
-                .calendar_week(false)
-                .start_end_years(2000..=2100),
-        );
-        if !with_weekday {
-            return;
-        }
-        ui.label(meta(weekday_cn(self.date)).weak());
-        let current_date = today();
-        if self.date != current_date {
-            ui.add_space(theme::GAP_XS);
-            if ui.add(egui::Button::new(meta("今天"))).clicked() {
-                self.date = current_date;
-            }
-        }
-    }
-
-    /// 查询日期这一组：标签、日期选择、星期、可选的「今天」按钮。
-    ///
-    /// 全部放在同一个水平布局里直接排列，保证基线一致；控件高度由主题统一。
-    fn date_controls(&mut self, ui: &mut Ui) {
-        ui.spacing_mut().item_spacing.x = theme::GAP_S;
-        ui.label(meta("查询日期").weak());
-        self.date_picker(ui, true);
     }
 
     fn error_banner(&mut self, ui: &mut Ui) {
@@ -981,6 +958,8 @@ impl LltApp {
                 "例如 G1 / K54 / 1461",
                 field_width,
             ));
+            // 车次页的日期紧挨输入框右边：看过哪天的车一目了然。
+            date_picker(ui, &mut self.dates.train, "train_date", false);
             self.take_focus(ui, FocusField::Train, &response);
             if response.changed() {
                 self.refresh_train_search();
@@ -1025,7 +1004,7 @@ impl LltApp {
             return;
         }
 
-        let selected_ymd = ymd(self.date);
+        let selected_ymd = ymd(self.dates.train);
         let (running, not_running): (Vec<&TrainSummary>, Vec<&TrainSummary>) = self
             .train_results
             .iter()
@@ -1178,6 +1157,9 @@ impl LltApp {
             if fuzzy.changed() {
                 changed = true;
             }
+            // 日期在最后（不带星期，「今天」从弹窗里点）：一行要同时放下输入框、
+            // 模糊和日期，多两个字就会换行。
+            date_picker(ui, &mut self.dates.station, "station_date", false);
             if let Some(title) = self.station_board_for.as_ref().filter(|_| !bar) {
                 let text = if self.station_options.len() > 1 {
                     if width >= 430.0 {
@@ -1350,7 +1332,7 @@ impl LltApp {
             return;
         }
 
-        let date = self.date;
+        let date = self.dates.get(self.tab);
         let (running, not_running): (Vec<&StationStop>, Vec<&StationStop>) = self
             .station_board
             .iter()
@@ -1593,6 +1575,9 @@ impl LltApp {
                 }
             }
         });
+        ui.add_space(theme::GAP_XS);
+        // 日期单独一行：放在输入框下面、车站筛选上面（竖屏与侧栏都这样）。
+        ui.horizontal(|ui| date_picker(ui, &mut self.dates.od, "od_date", true));
         if landscape
             && ui
                 .checkbox(&mut self.od_fuzzy, meta("模糊"))
@@ -1762,7 +1747,7 @@ impl LltApp {
             return;
         }
 
-        let date = self.date;
+        let date = self.dates.get(self.tab);
         let (running, not_running): (Vec<&OdResult>, Vec<&OdResult>) = filtered
             .iter()
             .copied()
@@ -2075,7 +2060,7 @@ impl LltApp {
             via_page_open = false;
         }
         let extras = &self.extras;
-        let date = ymd(self.date);
+        let date = ymd(self.dates.get(self.tab));
         let open = format!(
             "开行 {}",
             date_window(detail.summary.date_from, detail.summary.date_to)
@@ -2360,7 +2345,7 @@ impl LltApp {
             return;
         };
         let query = normalize_code(code);
-        let date = ymd(self.date);
+        let date = ymd(self.dates.get(self.tab));
         match db.search_trains(&query, None) {
             Ok(hits) => match hits
                 .iter()
@@ -2503,9 +2488,16 @@ impl LltApp {
             return;
         }
 
-        egui::Panel::top("header")
-            .frame(theme::panel_frame(ui))
-            .show(ui, |ui| self.header(ui));
+        // 横屏（矮而宽）不画头部：标签页和版本都在左栏里，纵向空间让给内容。
+        let landscape = self.bottom_bar()
+            && ui.available_height() < theme::LANDSCAPE_MAX_HEIGHT
+            && ui.available_width() >= theme::LANDSCAPE_MIN_WIDTH
+            && self.detail.is_none();
+        if !landscape {
+            egui::Panel::top("header")
+                .frame(theme::panel_frame(ui))
+                .show(ui, |ui| self.header(ui));
+        }
 
         // 触摸窄屏（手机）不建底部面板：列表和面板各分一半后谁都看不清，
         // 改成「整车次一页」——详情直接replace掉列表，而不是叠一个会自己长高的模态。
@@ -2538,13 +2530,8 @@ impl LltApp {
             }
         }
 
-        // 横屏（矮而宽）：竖排那套「输入 + 筛选 + 底栏两行」会把表格压成一条缝，
-        // 改成左右两栏——左栏标签 + 控件 + 动作，右栏只放结果表。
-        let landscape = self.bottom_bar()
-            && !touch_page
-            && ui.available_height() < theme::LANDSCAPE_MAX_HEIGHT
-            && ui.available_width() >= theme::LANDSCAPE_MIN_WIDTH;
-        if landscape {
+        // 横屏：改成左右两栏——左栏标签 + 控件 + 动作，右栏只放结果表。
+        if landscape && !touch_page {
             // 0.44 是量出来的：站站那行要「模糊 + 两个 96 点的框 + ⇌ + 间距」≈ 312 点，
             // 侧栏内容宽（扣掉左右各 12 点留白）得比它再宽一点才不会换行。
             let side_width = (ui.available_width() * 0.44).clamp(312.0, 400.0);
@@ -2553,16 +2540,25 @@ impl LltApp {
                 .exact_size(side_width)
                 .frame(theme::panel_frame(ui))
                 .show(ui, |ui| {
-                    // 动作行贴底，控件在它上面滚动（横屏高度小，控件多的页面要能滚）。
-                    if self.action_bar_needed() {
-                        egui::Panel::bottom("side_actions")
-                            .frame(egui::Frame::NONE)
-                            .show(ui, |ui| {
-                                ui.add_space(theme::GAP_XS);
-                                ui.separator();
-                                self.action_bar(ui);
+                    // 底部：版本 + 主题（头部在横屏隐藏了，这里补上）+ 动作行。
+                    egui::Panel::bottom("side_actions")
+                        .frame(egui::Frame::NONE)
+                        .show(ui, |ui| {
+                            ui.add_space(theme::GAP_XS);
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                if let Some(version) = self.data_version {
+                                    ui.label(meta(format!("数据 {}", date_ymd(version))).weak())
+                                        .on_hover_text("数据包版本（库内 meta.data_version）");
+                                }
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    self.theme_button(ui);
+                                });
                             });
-                    }
+                            if self.action_bar_needed() {
+                                self.action_bar(ui);
+                            }
+                        });
                     egui::ScrollArea::vertical()
                         .id_salt("side_controls")
                         .auto_shrink([false, false])
@@ -2621,7 +2617,7 @@ impl LltApp {
             Tab::Od => self.od_ui(ui, part),
             Tab::Data => {
                 if part != TabPart::Controls {
-                    self.data_ui(ui);
+                    self.settings_ui(ui);
                 }
             }
         }
@@ -2729,7 +2725,7 @@ impl LltApp {
 
     /// 当前列表里「当日开行 / 不开行」的条数（只统计已经在手上的结果）。
     fn running_split(&self) -> (usize, usize) {
-        let selected = ymd(self.date);
+        let selected = ymd(self.dates.get(self.tab));
         match self.tab {
             Tab::Train => self.train_results.iter().fold((0, 0), |(on, off), train| {
                 if train.runs_on(selected) {
@@ -2739,7 +2735,7 @@ impl LltApp {
                 }
             }),
             Tab::Station => self.station_board.iter().fold((0, 0), |(on, off), stop| {
-                if stop.runs_on(origin_ymd(self.date, stop.day)) {
+                if stop.runs_on(origin_ymd(self.dates.get(self.tab), stop.day)) {
                     (on + 1, off)
                 } else {
                     (on, off + 1)
@@ -2750,7 +2746,7 @@ impl LltApp {
                 .iter()
                 .filter(|hit| self.od_filtered(hit))
                 .fold((0, 0), |(on, off), hit| {
-                    if hit.runs_on(origin_ymd(self.date, hit.depart_day)) {
+                    if hit.runs_on(origin_ymd(self.dates.get(self.tab), hit.depart_day)) {
                         (on + 1, off)
                     } else {
                         (on, off + 1)
@@ -2796,6 +2792,37 @@ impl LltApp {
         }
     }
 
+    /// 「设置」页：三个查询页的开关 + 数据（子章节）。
+    fn settings_ui(&mut self, ui: &mut Ui) {
+        egui::ScrollArea::vertical()
+            .id_salt("settings_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                self.query_settings_ui(ui);
+                ui.add_space(theme::GAP_M);
+                ui.separator();
+                ui.add_space(theme::GAP_M);
+                self.data_ui(ui);
+            });
+    }
+
+    /// 「查询」小节：三个查询页各自的模糊开关（车次页没有模糊）。
+    fn query_settings_ui(&mut self, ui: &mut Ui) {
+        ui.label(
+            RichText::new("查询")
+                .size(theme::FONT_SECTION)
+                .family(fonts::bold_family()),
+        );
+        ui.add_space(theme::GAP_XS);
+        ui.checkbox(&mut self.od_fuzzy, meta("站站：模糊匹配同城车站"))
+            .on_hover_text("出发/到达按城市或同城组匹配所有车站");
+        ui.checkbox(&mut self.station_fuzzy, meta("车站：模糊匹配同城车站"))
+            .on_hover_text("站名按城市/同城组匹配，包含同城所有车站");
+        ui.label(meta("车次页没有模糊开关：车次号本身就是精确的前缀匹配。").weak());
+        ui.add_space(theme::GAP_XS);
+        ui.label(meta("查询日期分别在三个查询页里设置，各存一份。").weak());
+    }
+
     /// 「数据」页：当前库、检查更新、下载重建、备份导入导出。
     fn data_ui(&mut self, ui: &mut Ui) {
         let outcome = self.data.ui(ui, &self.db_path);
@@ -2819,6 +2846,32 @@ impl LltApp {
 }
 
 // ---------------------------------------------------------------- 辅助函数
+
+/// 某个查询页的日期选择。`salt` 区分三个页面各自的日历弹窗状态。
+///
+/// `with_weekday` 为假时只画按钮本身（星期与「今天」从弹窗里也能看到），
+/// 用在横屏侧栏这种窄地方。
+fn date_picker(ui: &mut Ui, date: &mut Date, salt: &'static str, with_weekday: bool) {
+    ui.add(
+        DatePickerButton::new(date)
+            .id_salt(salt)
+            .show_icon(false)
+            .highlight_weekends(false)
+            .calendar_week(false)
+            .start_end_years(2000..=2100),
+    );
+    if !with_weekday {
+        return;
+    }
+    ui.label(meta(weekday_cn(*date)).weak());
+    let current_date = today();
+    if *date != current_date {
+        ui.add_space(theme::GAP_XS);
+        if ui.add(egui::Button::new(meta("今天"))).clicked() {
+            *date = current_date;
+        }
+    }
+}
 
 /// 交换按钮里「⇌」的字号：按「字形行高 + 按钮内边距 ≤ 控件高度」反推。
 ///
@@ -3091,8 +3144,8 @@ fn stops_table_ui(ui: &mut Ui, stops: &[Stop]) -> Option<String> {
             body.rows(theme::detail_row_height(), stops.len(), |mut row| {
                 let index = row.index();
                 let stop = &stops[index];
-                // 跨日边界画一条分隔线，配合「第 N 天」列读出换天位置。
-                row.set_overline(index > 0 && stop.day > stops[index - 1].day);
+                // 不再按「第 N 天」画跨日分隔线：「天」列本身已经写明第几天，
+                // 那条横线在密集表格里只会和斑马纹、行分隔线抢注意力。
                 row.col(|ui| {
                     let is_terminal = stop.seq == 1 || Some(stop.seq) == last_seq;
                     let text = if is_terminal {

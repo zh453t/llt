@@ -19,7 +19,7 @@ csv = "1.4.0"
 # Android 的 NativeActivity 与 accesskit 互斥，不能一起打开。
 eframe = { version = "0.37", default-features = false }
 egui_extras = { version = "0.37", features = ["datepicker"] }
-jiff = "0.2"
+jiff = { version = "0.2", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0"
 unicode-width = "0.2"

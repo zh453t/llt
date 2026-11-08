@@ -15,6 +15,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
 
 /// 配置文件默认文件名（放在可执行文件旁）。
@@ -64,6 +65,8 @@ pub struct UiSettings {
 #[serde(default)]
 pub struct TrainSettings {
     pub query: String,
+    /// 车次页的查询日期；`None` = 今天（每次启动重新取，不把「昨天」留在配置里）。
+    pub date: Option<Date>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +74,8 @@ pub struct TrainSettings {
 pub struct StationSettings {
     pub query: String,
     pub fuzzy: bool,
+    /// 车站页的查询日期；`None` = 今天。
+    pub date: Option<Date>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +84,8 @@ pub struct OdSettings {
     pub from: String,
     pub to: String,
     pub fuzzy: bool,
+    /// 站站页的查询日期；`None` = 今天。
+    pub date: Option<Date>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,15 +245,18 @@ mod tests {
             ui: UiSettings { tab: Tab::Station },
             train: TrainSettings {
                 query: "G1".to_owned(),
+                date: Some(jiff::civil::date(2026, 11, 8)),
             },
             station: StationSettings {
                 query: "北京".to_owned(),
                 fuzzy: true,
+                date: None,
             },
             od: OdSettings {
                 from: "北京".to_owned(),
                 to: "上海".to_owned(),
                 fuzzy: true,
+                date: Some(jiff::civil::date(2026, 12, 24)),
             },
             detail: DetailSettings {
                 via_stations_only: false,
