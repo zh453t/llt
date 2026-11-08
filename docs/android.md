@@ -116,7 +116,8 @@ android/
 ```
 
 - 清单：`INTERNET`（下载）、`usesCleartextTraffic="true"`（官方接口是明文 HTTP）、
-  `minSdk 26`、`targetSdk 34`、`hasCode=true`（因为有自己的 Java 类）。
+  `minSdk 26`、`compileSdk/targetSdk 36`、`hasCode=true`（因为有自己的 Java 类）。
+  targetSdk 36 在 Android 15+ 上强制 edge-to-edge，正好与「自己问 WindowInsets」的做法一致。
 - 打包的两个 ABI：`arm64-v8a`（真机）+ `x86_64`（模拟器）。
 - `.so` 压缩进 APK：两个 ABI 加起来 30 MB，不压 APK 直接 29 MB；压完 13 MB。
 - 签名：`build.ps1 -Release` 首次运行用 keytool 生成 `android/keystore/llt-release.jks`
@@ -134,10 +135,10 @@ ABI、签名都是标准配置，`ImeBridge` 也省掉了
 | 组件 | 版本 / 位置 |
 |---|---|
 | Rust | 1.99.1；`rustup target add aarch64-linux-android x86_64-linux-android` |
-| Android SDK | `%LOCALAPPDATA%\Android\Sdk`（platform 34、build-tools 34.0.0、platform-tools） |
+| Android SDK | `%LOCALAPPDATA%\Android\Sdk`（platform 36、build-tools 36.0.0、platform-tools） |
 | Android NDK | `%LOCALAPPDATA%\Android\Sdk\ndk\27.3.13750724`（r27d） |
-| JDK | Android Studio 自带 `jbr`（21.0.5） |
-| Gradle | 8.13（`GRADLE_HOME` 指向解压目录；AGP 8.7.3 需要 ≥8.9） |
+| JDK | Android Studio 自带 `jbr`（25.0.4） |
+| Gradle | 9.9.0（`GRADLE_HOME` 指向解压目录）；AGP 9.5.1 |
 | cargo-ndk | `cargo install cargo-ndk` |
 | 模拟器镜像 | `system-images;android-33;default;x86_64` |
 
@@ -146,24 +147,25 @@ rustup target add aarch64-linux-android x86_64-linux-android
 cargo install cargo-ndk
 # NDK：https://dl.google.com/android/repository/android-ndk-r27d-windows.zip
 #      -> %LOCALAPPDATA%\Android\Sdk\ndk\27.3.13750724
-# Gradle：https://mirrors.cloud.tencent.com/gradle/gradle-8.13-bin.zip
+# Gradle：https://mirrors.cloud.tencent.com/gradle/gradle-9.9.0-bin.zip
 #      -> 任意目录，设 $env:GRADLE_HOME
 ```
 
 `build.ps1` 用的环境变量（不设就用默认值）：`ANDROID_HOME`、`ANDROID_NDK_ROOT`、
 `JAVA_HOME`、`GRADLE_HOME`。脚本开头会打印 SDK / NDK / JDK（含版本）/ Gradle 的路径，
-并在 JDK 版本高于 Gradle 支持上限、或缺少 platform 34 / build-tools 时直接给出警告。
+并在 JDK 版本高于 Gradle 支持上限、或缺少 platform 36 / build-tools 时直接给出警告。
 
 ### 工具链会被 Android Studio 更新改掉
 
 Studio 更新会替换自带的 `jbr`（JDK）、并可能顺带更新 SDK 组件，而这三件事是本仓库
-**写死**的：AGP `8.7.3`、Gradle `8.13`、`compileSdk/targetSdk 34`、NDK `r27d`。
+**写死**的：AGP `9.5.1`、Gradle `9.9.0`、`compileSdk/targetSdk 36`、NDK `r27d`。
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| `Unsupported class file major version 68`（或类似） | Studio 把 jbr 升到了 JDK 24+，Gradle 8.13 只支持到 JDK 23 | 设 `LLT_GRADLE_JAVA_HOME` 指向一个 JDK 17–23（只给 Gradle 用，不动系统 `JAVA_HOME`），或把 `GRADLE_HOME` 换到 Gradle 8.14+（可能还要升 AGP） |
-| `Failed to find Build Tools revision ...` | build-tools 被移走 | SDK Manager 装 `build-tools;34.0.0` |
-| `platforms;android-34` 缺失提示 | 同上 | 装 `platforms;android-34`，或改 `app/build.gradle.kts` 的 `compileSdk` |
+| `Unsupported class file major version ...` | Studio 的 jbr 比当前 Gradle 支持的新（Gradle 9.9 已支持 JDK 25） | 升 `GRADLE_HOME` 到新版本，或用 `LLT_GRADLE_JAVA_HOME` 指定一个较旧的 JDK（只给 Gradle 用） |
+| `Android Gradle plugin requires Java 17` | jbr 或 `JAVA_HOME` 低于 JDK 17 | 把 `JAVA_HOME`/`LLT_GRADLE_JAVA_HOME` 指到 JDK 17+ |
+| `Failed to find Build Tools revision ...` | build-tools 被移走 | SDK Manager 装 `build-tools;36.0.0` |
+| `platforms;android-36` 缺失提示 | 同上 | 装 `platforms;android-36`，或改 `app/build.gradle.kts` 的 `compileSdk` |
 | `NDK not found` / `cargo ndk` 报找不到 NDK | Studio 重装时删了 NDK | 重新解压 r27d 到 `$ANDROID_HOME
 dk.3.13750724`（`build.ps1` 取 `ndk/` 下最新一版） |
 | 升级 Studio 时提示「`jbr` 被占用，无法删除」 | Gradle 守护进程是拿 `jbr` 起的 `java.exe`，它活着目录就删不掉 | 先跑 `pwsh -File android/stop-java.ps1`（先试 `gradle --stop`，不行就按路径结束进程），再升级 |
@@ -242,7 +244,8 @@ adb shell screencap -p /sdcard/s.png   # 无窗口也能截屏
 | 导入备份 | 系统选择器选中同一份 → 校验通过 → 「已导入 …（数据 20261114）」|
 | 系统栏 / 软键盘 | 状态栏 136 px、导航栏 132 px、键盘 912 px 三种缩进都正确让开了 |
 | 输入法 | 中文合成、`G12` 输入、回车触发查询都正常 |
-| 真机（vivo / Android 17 / arm64） | 覆盖安装保留原库；查询正常；检查更新 20261108 → 20261114；导出 41.7 MB 到系统「下载」成功；状态栏 140 px 让开正确 |
+| 真机（vivo / Android 17 / arm64） | 覆盖安装保留原库；查询、详情、经由、底栏、输入法均正常；检查更新 20261108 → 20261114；状态栏 140 px 让开正确 |
+| 工具链升级后（JDK 25 / Gradle 9.9 / AGP 9.5.1 / compileSdk 36） | 真机与模拟器都重新安装验证通过；targetSdk 36 的强制 edge-to-edge 下缩进仍然正确；明文 HTTP 的版本接口照常可用 |
 | 底栏 | 标签页 + 动作行落在底部；车次页从「输入 + 计数 + 表格」变成「输入 + 表格」，多出约 2 行 |
 | 紧凑头部 | 一行头部（标题 + 日期 + 主题），比原来三行多出约 2 行列表空间 |
 | APK 体积 | 13.2 MB（不含数据库）|

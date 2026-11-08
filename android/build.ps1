@@ -87,15 +87,16 @@ Write-Host "JAVA: $env:JAVA_HOME ($java_version)"
 
 # Android Studio 更新会换掉自带的 jbr（JDK 版本）和 SDK 组件，先把前置条件摊开：
 # 失败时不用再去猜是 JDK 太新、还是 platform/build-tools 被移走了。
-if ($java_major -gt 23) {
-    Write-Warning "JDK $java_major 高于 Gradle 8.13 支持的上限（23）。用 LLT_GRADLE_JAVA_HOME 指定一个 JDK 17–23（只影响 Gradle），或把 GRADLE_HOME 换到 Gradle 8.14+。"
+# AGP 9 要求 JDK 17+；Gradle 9.9 能跑在 JDK 25 上。低于 17 的 JDK 一定跑不起来，先拦下。
+if ($java_major -gt 0 -and $java_major -lt 17) {
+    throw "JDK $java_major 太旧：AGP 9 要求 JDK 17 以上（当前 $java_version）。用 LLT_GRADLE_JAVA_HOME 指定一个较新的 JDK。"
 }
-if (-not (Test-Path (Join-Path $env:ANDROID_HOME 'platforms/android-34'))) {
-    Write-Warning "缺少 SDK platform 34（compileSdk）。用 SDK Manager 装 platforms;android-34，或改 app/build.gradle.kts 的 compileSdk。"
+if (-not (Test-Path (Join-Path $env:ANDROID_HOME 'platforms/android-36'))) {
+    Write-Warning "缺少 SDK platform 36（compileSdk）。用 SDK Manager 装 platforms;android-36，或改 app/build.gradle.kts 的 compileSdk。"
 }
 $buildTools = Get-ChildItem (Join-Path $env:ANDROID_HOME 'build-tools') -Directory -ErrorAction SilentlyContinue
 if (-not $buildTools) {
-    Write-Warning "缺少 build-tools。用 SDK Manager 装 build-tools;34.0.0。"
+    Write-Warning "缺少 build-tools。用 SDK Manager 装 build-tools;36.0.0。"
 }
 
 # Gradle：优先环境变量里指定的，其次 PATH，最后用仓库里的 wrapper。
