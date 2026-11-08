@@ -91,6 +91,22 @@ pub fn list_header_height() -> f32 {
     }
 }
 
+/// 筛选 chip 的高度与内边距：比控件矮一档，一行能放更多个，也不至于点不中。
+pub fn chip_height() -> f32 {
+    match pointer() {
+        Pointer::Mouse => 22.0,
+        Pointer::Touch => 30.0,
+    }
+}
+
+/// 筛选 chip 的内边距（左右, 上下）。
+pub fn chip_padding() -> Vec2 {
+    match pointer() {
+        Pointer::Mouse => Vec2::new(6.0, 1.0),
+        Pointer::Touch => Vec2::new(8.0, 2.0),
+    }
+}
+
 /// 详情里的停站表 / 经由表行高。
 pub fn detail_row_height() -> f32 {
     match pointer() {
@@ -175,6 +191,13 @@ pub fn panel_frame(ui: &egui::Ui) -> egui::Frame {
     };
     egui::Frame::new()
         .inner_margin(Margin::symmetric(PANEL_MARGIN_X, margin_y))
+        .fill(ui.visuals().panel_fill)
+}
+
+/// 底部栏的内边距与底色：比面板更薄，只留够放下一行控件的高度。
+pub fn bar_frame(ui: &egui::Ui) -> egui::Frame {
+    egui::Frame::new()
+        .inner_margin(Margin::symmetric(PANEL_MARGIN_X, 4))
         .fill(ui.visuals().panel_fill)
 }
 

@@ -27,9 +27,9 @@ const INSET_PROBE_INTERVAL: Duration = Duration::from_millis(150);
 impl Tab {
     fn label(self) -> &'static str {
         match self {
-            Tab::Od => "站站查询",
-            Tab::Train => "按车次",
-            Tab::Station => "按车站",
+            Tab::Od => "站站",
+            Tab::Train => "车次",
+            Tab::Station => "车站",
             Tab::Data => "数据",
         }
     }
@@ -221,7 +221,7 @@ impl LltApp {
             db_path,
             db_error: None,
             data_version: None,
-            // 上次停留的标签页；第一次启动是第一位（站站查询）。
+            // 上次停留的标签页；第一次启动是第一位（站站）。
             tab: settings.ui.tab,
             date: today(),
             train_query: settings.train.query.clone(),
@@ -355,7 +355,7 @@ impl LltApp {
 
     // ------------------------------------------------------------ 配置
 
-    /// 切到某个标签页时该抢焦点的输入框（站站查询落在还空着的那一侧）。
+    /// 切到某个标签页时该抢焦点的输入框（站站落在还空着的那一侧）。
     fn focus_field(&self, tab: Tab) -> FocusField {
         match tab {
             Tab::Train => FocusField::Train,
@@ -716,30 +716,18 @@ impl LltApp {
 
     fn header(&mut self, ui: &mut Ui) {
         let width = ui.available_width();
-        // 触摸窄屏（手机）把标题、日期、主题塞进同一行：三行头部会吃掉两成的屏幕，
-        // 而标签页那一行已经够宽了。
-        let dense = theme::pointer() == theme::Pointer::Touch && width < WIDE_MIN_WIDTH;
-        if dense {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new("路路通时刻表")
-                        .size(theme::FONT_SECTION)
-                        .family(fonts::bold_family()),
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    self.theme_button(ui);
-                    ui.add_space(theme::GAP_S);
-                    self.date_picker(ui, false);
-                });
-            });
-            ui.add_space(theme::GAP_XS);
-            self.tab_bar(ui);
-            return;
-        }
+        let touch = self.platform.pointer == theme::Pointer::Touch;
+        // 触摸屏：标签页挪到底栏（见 `body`），顶栏只留一行「标题 + 日期 + 主题」。
+        // 手机再小一号标题，抵掉一部分安全区。
+        let title_size = if touch && width < WIDE_MIN_WIDTH {
+            theme::FONT_SECTION
+        } else {
+            theme::FONT_TITLE
+        };
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new("路路通时刻表")
-                    .size(theme::FONT_TITLE)
+                    .size(title_size)
                     .family(fonts::bold_family()),
             );
             if width > 700.0
@@ -751,7 +739,10 @@ impl LltApp {
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 self.theme_button(ui);
-                if width > 980.0 {
+                if touch {
+                    ui.add_space(theme::GAP_S);
+                    self.date_picker(ui, false);
+                } else if width > 980.0 {
                     let file_name = self
                         .db_path
                         .file_name()
@@ -762,6 +753,9 @@ impl LltApp {
                 }
             });
         });
+        if touch {
+            return;
+        }
 
         ui.add_space(theme::GAP_S);
         let inline_date = ui.available_width() >= theme::INLINE_DATE_MIN_WIDTH;
@@ -789,9 +783,9 @@ impl LltApp {
             // 标签页之间只靠内边距分隔，避免多余的分隔线。
             ui.spacing_mut().item_spacing.x = 2.0;
             let tabs = [
-                (Tab::Od, "站站查询"),
-                (Tab::Train, "按车次"),
-                (Tab::Station, "按车站"),
+                (Tab::Od, "站站"),
+                (Tab::Train, "车次"),
+                (Tab::Station, "车站"),
                 (Tab::Data, "数据"),
             ];
             let entered = self.tab;
@@ -813,6 +807,37 @@ impl LltApp {
                 self.data.refresh(&self.db_path);
             }
         });
+    }
+
+    /// 底栏里的标签页：四等分、整块可点（屏幕上最小的点击单位也够大）。
+    fn tab_bar_segments(&mut self, ui: &mut Ui) {
+        let tabs = [
+            (Tab::Od, "站站"),
+            (Tab::Train, "车次"),
+            (Tab::Station, "车站"),
+            (Tab::Data, "数据"),
+        ];
+        let entered = self.tab;
+        let height = theme::control_height();
+        ui.columns(tabs.len(), |columns| {
+            for (index, (tab, label)) in tabs.iter().enumerate() {
+                let column = &mut columns[index];
+                let selected = self.tab == *tab;
+                let button = egui::Button::selectable(
+                    selected,
+                    RichText::new(*label).size(theme::FONT_BODY),
+                );
+                let width = column.available_width();
+                if column.add_sized([width, height], button).clicked() {
+                    self.tab = *tab;
+                    self.focus_request = Some(self.focus_field(*tab));
+                }
+            }
+        });
+        if self.tab != entered && self.tab == Tab::Data {
+            // 进数据页时重读一次：库可能刚被命令行或别的进程换掉。
+            self.data.refresh(&self.db_path);
+        }
     }
 
     /// 浅色 / 深色切换。
@@ -897,6 +922,7 @@ impl LltApp {
     }
 
     fn train_ui(&mut self, ui: &mut Ui) {
+        let bar = self.bottom_bar();
         let width = ui.available_width();
         let field_width = (width * 0.34).clamp(140.0, 240.0);
         let mut clear = false;
@@ -912,7 +938,8 @@ impl LltApp {
             if response.changed() {
                 self.refresh_train_search();
             }
-            if !self.train_query.trim().is_empty() {
+            // 触摸屏上「清空 + 计数」在底栏（`train_bar`）。
+            if !bar && !self.train_query.trim().is_empty() {
                 if ui.add(egui::Button::new(meta("清空"))).clicked() {
                     clear = true;
                 }
@@ -930,7 +957,7 @@ impl LltApp {
         if self.train_query.trim().is_empty() {
             empty_state(
                 ui,
-                "按车次查询",
+                "车次",
                 "输入车次号开始查询，支持前缀匹配（G1）和车次号（54）。",
             );
             return;
@@ -951,7 +978,9 @@ impl LltApp {
             .partition(|train| train.runs_on(selected_ymd));
         let rows: Vec<&TrainSummary> = running.iter().chain(not_running.iter()).copied().collect();
         let running_count = running.len();
-        show_counts(ui, None, running_count, rows.len() - running_count);
+        if !bar {
+            show_counts(ui, None, running_count, rows.len() - running_count);
+        }
         let selected = self.selected;
         let clicked = Self::train_rows_table(ui, &rows, running_count, selected, "train_results");
         if let Some(index) = clicked {
@@ -1059,6 +1088,7 @@ impl LltApp {
     }
 
     fn station_ui(&mut self, ui: &mut Ui) {
+        let bar = self.bottom_bar();
         let width = ui.available_width();
         let field_width = (width * 0.34).clamp(140.0, 240.0);
         let mut clear = false;
@@ -1075,18 +1105,22 @@ impl LltApp {
             if response.changed() {
                 changed = true;
             }
-            if !self.station_query.trim().is_empty()
+            // 触摸屏上「清空 / 模糊 / 计数」在底栏（`station_bar`）。
+            if !bar
+                && !self.station_query.trim().is_empty()
                 && ui.add(egui::Button::new(meta("清空"))).clicked()
             {
                 clear = true;
             }
-            let fuzzy = ui
-                .checkbox(&mut self.station_fuzzy, meta("模糊"))
-                .on_hover_text("模糊搜索：按城市/同城组匹配，包含同城所有车站");
-            if fuzzy.changed() {
-                changed = true;
+            if !bar {
+                let fuzzy = ui
+                    .checkbox(&mut self.station_fuzzy, meta("模糊"))
+                    .on_hover_text("模糊搜索：按城市/同城组匹配，包含同城所有车站");
+                if fuzzy.changed() {
+                    changed = true;
+                }
             }
-            if let Some(title) = &self.station_board_for {
+            if let Some(title) = self.station_board_for.as_ref().filter(|_| !bar) {
                 let text = if self.station_options.len() > 1 {
                     if width >= 430.0 {
                         format!(
@@ -1178,30 +1212,34 @@ impl LltApp {
             let mut select_all = false;
             let mut select_none = false;
             ui.add_space(theme::GAP_XS);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = theme::GAP_XS;
-                ui.spacing_mut().item_spacing.y = 2.0;
-                ui.label(meta("车站筛选").weak());
-                ui.add_space(theme::GAP_XS);
-                for option in &self.station_options {
-                    let selected = self.station_selected.contains(&option.index);
-                    if ui
-                        .selectable_label(
-                            selected,
-                            RichText::new(&option.name).size(theme::FONT_META),
-                        )
-                        .clicked()
-                    {
-                        toggle = Some(option.index);
+            ui.scope(|ui| {
+                ui.spacing_mut().interact_size.y = theme::chip_height();
+                ui.spacing_mut().button_padding = theme::chip_padding();
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = theme::GAP_XS;
+                    ui.spacing_mut().item_spacing.y = 3.0;
+                    ui.label(meta("筛选").weak());
+                    ui.add_space(theme::GAP_XS);
+                    for option in &self.station_options {
+                        let selected = self.station_selected.contains(&option.index);
+                        if ui
+                            .selectable_label(
+                                selected,
+                                RichText::new(&option.name).size(theme::FONT_META),
+                            )
+                            .clicked()
+                        {
+                            toggle = Some(option.index);
+                        }
                     }
-                }
-                ui.add_space(theme::GAP_S);
-                if ui.add(egui::Button::new(meta("全选"))).clicked() {
-                    select_all = true;
-                }
-                if ui.add(egui::Button::new(meta("全不选"))).clicked() {
-                    select_none = true;
-                }
+                    ui.add_space(theme::GAP_S);
+                    if ui.add(egui::Button::new(meta("全选"))).clicked() {
+                        select_all = true;
+                    }
+                    if ui.add(egui::Button::new(meta("全不选"))).clicked() {
+                        select_none = true;
+                    }
+                });
             });
             if let Some(index) = toggle {
                 if !self.station_selected.remove(&index) {
@@ -1226,7 +1264,7 @@ impl LltApp {
             if self.station_query.trim().is_empty() {
                 empty_state(
                     ui,
-                    "按车站查询",
+                    "车站",
                     "输入车站名或城市名，查询在该站/同城停靠的列车。",
                 );
             } else {
@@ -1254,7 +1292,9 @@ impl LltApp {
             .partition(|stop| stop.runs_on(origin_ymd(date, stop.day)));
         let rows: Vec<&StationStop> = running.iter().chain(not_running.iter()).copied().collect();
         let running_count = running.len();
-        show_counts(ui, None, running_count, rows.len() - running_count);
+        if !bar {
+            show_counts(ui, None, running_count, rows.len() - running_count);
+        }
         let selected = self.selected;
         let show_station = self.station_selected.len() > 1;
         let clicked = Self::station_rows_table(
@@ -1408,13 +1448,17 @@ impl LltApp {
         let width = ui.available_width();
         let field_width = ((width - 300.0) / 2.0).clamp(110.0, 170.0);
         let mut changed = false;
+        // 触摸屏上「模糊 / 交换 / 查询」在底栏（`od_bar`），这里只留两个输入框。
+        let bar = self.bottom_bar();
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP_S;
-            let fuzzy = ui
-                .checkbox(&mut self.od_fuzzy, meta("模糊"))
-                .on_hover_text("模糊搜索：出发/到达按城市或同城组匹配所有车站");
-            if fuzzy.changed() {
-                changed = true;
+            if !bar {
+                let fuzzy = ui
+                    .checkbox(&mut self.od_fuzzy, meta("模糊"))
+                    .on_hover_text("模糊搜索：出发/到达按城市或同城组匹配所有车站");
+                if fuzzy.changed() {
+                    changed = true;
+                }
             }
             ui.label(RichText::new("出发").size(theme::FONT_BODY));
             let from = ui.add(
@@ -1432,7 +1476,7 @@ impl LltApp {
             // 不受宽屏限制：此时键盘已经在这个输入框上，跳一格不会额外弹键盘。
             let advance = from.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
-            if ui.add(egui::Button::new(meta("交换"))).clicked() {
+            if !bar && ui.add(egui::Button::new(meta("交换"))).clicked() {
                 std::mem::swap(&mut self.od_from, &mut self.od_to);
                 changed = true;
             }
@@ -1452,24 +1496,26 @@ impl LltApp {
                 to.request_focus();
             }
 
-            let can_query = !self.od_from.trim().is_empty() && !self.od_to.trim().is_empty();
-            let (fill, text_color) = if can_query {
-                (theme::primary_fill(ui), theme::primary_text())
-            } else {
-                (
-                    ui.visuals().widgets.inactive.weak_bg_fill,
-                    ui.visuals().weak_text_color(),
+            if !bar {
+                let can_query = !self.od_from.trim().is_empty() && !self.od_to.trim().is_empty();
+                let (fill, text_color) = if can_query {
+                    (theme::primary_fill(ui), theme::primary_text())
+                } else {
+                    (
+                        ui.visuals().widgets.inactive.weak_bg_fill,
+                        ui.visuals().weak_text_color(),
+                    )
+                };
+                let button = egui::Button::new(
+                    RichText::new("查询")
+                        .size(theme::FONT_BODY)
+                        .color(text_color),
                 )
-            };
-            let button = egui::Button::new(
-                RichText::new("查询")
-                    .size(theme::FONT_BODY)
-                    .color(text_color),
-            )
-            .fill(fill)
-            .stroke(egui::Stroke::NONE);
-            if ui.add_enabled(can_query, button).clicked() {
-                changed = true;
+                .fill(fill)
+                .stroke(egui::Stroke::NONE);
+                if ui.add_enabled(can_query, button).clicked() {
+                    changed = true;
+                }
             }
         });
         if changed {
@@ -1522,7 +1568,7 @@ impl LltApp {
 
         if self.od_results.is_empty() {
             if self.od_message.is_none() {
-                empty_state(ui, "站站查询", "输入出发站和到达站，查询可直达的列车。");
+                empty_state(ui, "站站", "输入出发站和到达站，查询可直达的列车。");
             }
             return;
         }
@@ -1563,33 +1609,38 @@ impl LltApp {
         if from_options.len() > 1 || to_options.len() > 1 {
             let had_filter = self.od_filter_from.is_some() || self.od_filter_to.is_some();
             ui.add_space(theme::GAP_XS);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = theme::GAP_XS;
-                ui.spacing_mut().item_spacing.y = 2.0;
-                ui.label(meta("车站筛选").weak());
-                ui.add_space(theme::GAP_XS);
-                Self::filter_chips(
-                    ui,
-                    "出发",
-                    &from_options,
-                    &from_available,
-                    &mut self.od_filter_from,
-                );
-                ui.add_space(theme::GAP_M);
-                Self::filter_chips(
-                    ui,
-                    "到达",
-                    &to_options,
-                    &to_available,
-                    &mut self.od_filter_to,
-                );
-                if had_filter {
-                    ui.add_space(theme::GAP_M);
-                    if ui.add(egui::Button::new(meta("清除筛选"))).clicked() {
-                        self.od_filter_from = None;
-                        self.od_filter_to = None;
+            // 这一块是「筛子」，不是主操作：整块压矮一档，别把表格挤下去。
+            ui.scope(|ui| {
+                ui.spacing_mut().interact_size.y = theme::chip_height();
+                ui.spacing_mut().button_padding = theme::chip_padding();
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = theme::GAP_XS;
+                    ui.spacing_mut().item_spacing.y = 3.0;
+                    ui.label(meta("筛选").weak());
+                    ui.add_space(theme::GAP_XS);
+                    Self::filter_chips(
+                        ui,
+                        "出发",
+                        &from_options,
+                        &from_available,
+                        &mut self.od_filter_from,
+                    );
+                    ui.add_space(theme::GAP_S);
+                    Self::filter_chips(
+                        ui,
+                        "到达",
+                        &to_options,
+                        &to_available,
+                        &mut self.od_filter_to,
+                    );
+                    if had_filter {
+                        ui.add_space(theme::GAP_S);
+                        if ui.add(egui::Button::new(meta("清除筛选"))).clicked() {
+                            self.od_filter_from = None;
+                            self.od_filter_to = None;
+                        }
                     }
-                }
+                });
             });
         }
 
@@ -1616,17 +1667,6 @@ impl LltApp {
             return;
         }
 
-        let mut count = format!("{} 趟直达", filtered.len());
-        if self.od_truncated {
-            count = format!("仅显示前 {OD_RESULT_LIMIT} 趟直达");
-        } else if filtered.len() != self.od_results.len() {
-            count = format!(
-                "{} 趟直达（共 {} 趟）",
-                filtered.len(),
-                self.od_results.len()
-            );
-        }
-
         let date = self.date;
         let (running, not_running): (Vec<&OdResult>, Vec<&OdResult>) = filtered
             .iter()
@@ -1634,7 +1674,20 @@ impl LltApp {
             .partition(|hit| hit.runs_on(origin_ymd(date, hit.depart_day)));
         let rows: Vec<&OdResult> = running.iter().chain(not_running.iter()).copied().collect();
         let running_count = running.len();
-        show_counts(ui, Some(count), running_count, rows.len() - running_count);
+        if !self.bottom_bar() {
+            // 触摸屏上这一行在底栏（`od_bar` 的计数），桌面仍留在表格上方。
+            let mut count = format!("{} 趟直达", filtered.len());
+            if self.od_truncated {
+                count = format!("仅显示前 {OD_RESULT_LIMIT} 趟直达");
+            } else if filtered.len() != self.od_results.len() {
+                count = format!(
+                    "{} 趟直达（共 {} 趟）",
+                    filtered.len(),
+                    self.od_results.len()
+                );
+            }
+            show_counts(ui, Some(count), running_count, rows.len() - running_count);
+        }
         let selected = self.selected;
         let clicked = Self::od_rows_table(ui, &rows, running_count, selected, "od_results");
         if let Some(index) = clicked {
@@ -2292,6 +2345,20 @@ impl LltApp {
             }
         }
 
+        // 触摸屏的底栏：标签页在最底下，动作行在它上面。
+        // 之所以放底部：标签页与「查询/清空/模糊」这些都不是输入框，却是表格上方
+        // 最占高度的东西；挪到拇指能够到的地方，表格就能多几行。
+        if self.bottom_bar() && !touch_page {
+            egui::Panel::bottom("tab_bar_bottom")
+                .frame(theme::bar_frame(ui))
+                .show(ui, |ui| self.tab_bar_segments(ui));
+            if self.tab != Tab::Data {
+                egui::Panel::bottom("action_bar")
+                    .frame(theme::bar_frame(ui))
+                    .show(ui, |ui| self.action_bar(ui));
+            }
+        }
+
         egui::CentralPanel::default()
             .frame(theme::panel_frame(ui))
             .show(ui, |ui| {
@@ -2311,6 +2378,183 @@ impl LltApp {
                     Tab::Data => self.data_ui(ui),
                 }
             });
+    }
+
+    /// 是否是触摸屏（底栏只在触摸屏上出现；桌面保持原来的三行头部）。
+    fn bottom_bar(&self) -> bool {
+        self.platform.pointer == theme::Pointer::Touch
+    }
+
+    /// 底栏的动作行：把「不是输入框、又占表格上方空间」的控件收在这里。
+    ///
+    /// 每个标签页只放当前这页用得上的：查询 / 清空 / 模糊 / 交换，右侧是这一页的
+    /// 计数（原来那一行「当日开行 N 趟」）。数据页不需要动作行。
+    fn action_bar(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = theme::GAP_S;
+            match self.tab {
+                Tab::Od => self.od_bar(ui),
+                Tab::Train => self.train_bar(ui),
+                Tab::Station => self.station_bar(ui),
+                Tab::Data => {}
+            }
+        });
+    }
+
+    /// 站站查询的动作行：模糊 / 交换 / 查询。
+    fn od_bar(&mut self, ui: &mut Ui) {
+        let height = theme::control_height();
+        let mut changed = false;
+        if ui
+            .checkbox(&mut self.od_fuzzy, meta("模糊"))
+            .on_hover_text("模糊搜索：出发/到达按城市或同城组匹配所有车站")
+            .changed()
+        {
+            changed = true;
+        }
+        if ui
+            .add(egui::Button::new(meta("交换")).min_size(egui::vec2(0.0, height)))
+            .clicked()
+        {
+            std::mem::swap(&mut self.od_from, &mut self.od_to);
+            changed = true;
+        }
+        let can_query = !self.od_from.trim().is_empty() && !self.od_to.trim().is_empty();
+        let (running, not_running) = self.running_split();
+        let total = self.od_shown_count();
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let (fill, text_color) = if can_query {
+                (theme::primary_fill(ui), theme::primary_text())
+            } else {
+                (
+                    ui.visuals().widgets.inactive.weak_bg_fill,
+                    ui.visuals().weak_text_color(),
+                )
+            };
+            let button = egui::Button::new(
+                RichText::new("查询")
+                    .size(theme::FONT_BODY)
+                    .color(text_color),
+            )
+            .fill(fill)
+            .stroke(egui::Stroke::NONE)
+            .min_size(egui::vec2(88.0, height));
+            if ui.add_enabled(can_query, button).clicked() {
+                changed = true;
+            }
+            counts_label(ui, total, running, not_running);
+        });
+        if changed {
+            self.refresh_od();
+        }
+    }
+
+    /// 按车次的动作行：清空 + 计数。
+    fn train_bar(&mut self, ui: &mut Ui) {
+        let height = theme::control_height();
+        let has_query = !self.train_query.trim().is_empty();
+        if has_query
+            && ui
+                .add(egui::Button::new(meta("清空")).min_size(egui::vec2(0.0, height)))
+                .clicked()
+        {
+            self.train_query.clear();
+            self.train_results.clear();
+            // 清空是为了立刻重输，焦点留在（还给）输入框。
+            self.focus_request = Some(FocusField::Train);
+        }
+        let total = self.train_results.len();
+        let (running, not_running) = self.running_split();
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            counts_label(ui, total, running, not_running);
+        });
+    }
+
+    /// 按车站的动作行：清空 / 模糊 + 计数。
+    fn station_bar(&mut self, ui: &mut Ui) {
+        let height = theme::control_height();
+        let mut changed = false;
+        if !self.station_query.trim().is_empty()
+            && ui
+                .add(egui::Button::new(meta("清空")).min_size(egui::vec2(0.0, height)))
+                .clicked()
+        {
+            self.station_query.clear();
+            self.station_suggestions.clear();
+            self.station_city_suggestions.clear();
+            self.station_options.clear();
+            self.station_selected.clear();
+            self.station_board_for = None;
+            self.station_board.clear();
+            self.focus_request = Some(FocusField::Station);
+        }
+        if ui
+            .checkbox(&mut self.station_fuzzy, meta("模糊"))
+            .on_hover_text("模糊搜索：按城市/同城组匹配，包含同城所有车站")
+            .changed()
+        {
+            changed = true;
+        }
+        let (running, not_running) = self.running_split();
+        let total = self.station_board.len();
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            counts_label(ui, total, running, not_running);
+        });
+        if changed {
+            self.refresh_station();
+        }
+    }
+
+    /// 当前列表里「当日开行 / 不开行」的条数（只统计已经在手上的结果）。
+    fn running_split(&self) -> (usize, usize) {
+        let selected = ymd(self.date);
+        match self.tab {
+            Tab::Train => self.train_results.iter().fold((0, 0), |(on, off), train| {
+                if train.runs_on(selected) {
+                    (on + 1, off)
+                } else {
+                    (on, off + 1)
+                }
+            }),
+            Tab::Station => self.station_board.iter().fold((0, 0), |(on, off), stop| {
+                if stop.runs_on(origin_ymd(self.date, stop.day)) {
+                    (on + 1, off)
+                } else {
+                    (on, off + 1)
+                }
+            }),
+            Tab::Od => self
+                .od_results
+                .iter()
+                .filter(|hit| self.od_filtered(hit))
+                .fold((0, 0), |(on, off), hit| {
+                    if hit.runs_on(origin_ymd(self.date, hit.depart_day)) {
+                        (on + 1, off)
+                    } else {
+                        (on, off + 1)
+                    }
+                }),
+            _ => (0, 0),
+        }
+    }
+
+    /// 站站结果是否通过了「出发站 / 到达站」筛选（两侧互为约束）。
+    fn od_filtered(&self, hit: &OdResult) -> bool {
+        self.od_filter_from
+            .as_ref()
+            .is_none_or(|name| &hit.from_station == name)
+            && self
+                .od_filter_to
+                .as_ref()
+                .is_none_or(|name| &hit.to_station == name)
+    }
+
+    /// 筛选后还剩多少趟（底栏计数用，不区分开行/不开行）。
+    fn od_shown_count(&self) -> usize {
+        self.od_results
+            .iter()
+            .filter(|hit| self.od_filtered(hit))
+            .count()
     }
 
     /// 「数据」页：当前库、检查更新、下载重建、备份导入导出。
@@ -3327,6 +3571,25 @@ fn show_counts(ui: &mut Ui, prefix: Option<String>, running: usize, not_running:
         });
     });
     ui.add_space(theme::GAP_XS);
+}
+
+/// 底栏里的计数：`68 条 · ● 68 · ○ 0`，比 `show_counts` 更短。
+fn counts_label(ui: &mut Ui, total: usize, running: usize, not_running: usize) {
+    if total == 0 {
+        return;
+    }
+    // 调用方多半是 `right_to_left` 布局，这里再套一层从左到右，
+    // 否则每个 label 都会往前插，读出来是反的（"3 ○ 76 ●"）。
+    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+        let accent = theme::accent(ui);
+        let weak = theme::meta_color(ui);
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(RichText::new("●").size(9.0).color(accent));
+        ui.label(meta(running.to_string()));
+        ui.label(RichText::new("○").size(9.0).color(weak));
+        ui.label(meta(not_running.to_string()).weak());
+        ui.label(meta(format!("· {total} 条")).weak());
+    });
 }
 
 /// 合并列表中的状态圆点：● 当日开行，○ 当日不开行。

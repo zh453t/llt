@@ -26,7 +26,7 @@ const MAX_QUERY_CHARS: usize = 32;
 
 /// 三个标签页。
 ///
-/// 声明顺序就是界面顺序，也是第一次启动时的默认页（站站查询）。
+/// 声明顺序就是界面顺序，也是第一次启动时的默认页（站站）。
 /// 落盘时用 `snake_case`（`od` / `train` / `station`），手改配置也读得懂。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -309,7 +309,7 @@ mod tests {
         assert!(settings.station.query.is_empty());
         // 缺 detail 段时「只看车站」保持默认的 true。
         assert!(settings.detail.via_stations_only);
-        // 缺 ui 段时回到默认的第一页（站站查询）。
+        // 缺 ui 段时回到默认的第一页（站站）。
         assert_eq!(settings.ui.tab, Tab::Od);
         fs::remove_dir_all(dir).ok();
     }
