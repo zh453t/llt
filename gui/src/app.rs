@@ -2087,8 +2087,9 @@ impl LltApp {
         };
 
         if compact && ui.available_width() < theme::STACKED_DETAIL_MAX_WIDTH {
-            // 手机上整页只有**一个**滚动块：经由（窄条）→ 时刻表 → 杂项。
-            // 标题栏固定在上面，任何时候都能返回。
+            // 手机上整页：标题栏 + 经由入口固定在上面，下面只有一个滚动块
+            // （时刻表 → 杂项）。经由不跟着滚——它是一条入口/摘要，翻停站表时
+            // 滑走就再也找不回来，还得先滚回顶部。
             let has_via = !extras.via.is_empty();
             header_ui(
                 ui,
@@ -2099,18 +2100,15 @@ impl LltApp {
             );
             ui.add_space(theme::GAP_S);
             // 经由条自带一条顶线；这时再画分隔线就成了两条并排的重复线。
-            if !has_via {
-                ui.separator();
-                ui.add_space(theme::GAP_S);
+            if has_via {
+                via_page_trigger(ui, &extras.via, &mut via_page_open);
             }
+            ui.separator();
+            ui.add_space(theme::GAP_S);
             egui::ScrollArea::vertical()
                 .id_salt("detail_page_scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    if has_via {
-                        via_page_trigger(ui, &extras.via, &mut via_page_open);
-                        ui.add_space(theme::GAP_S);
-                    }
                     // 停站表按行数撑开（而不是吃满剩余高度），这样它才会跟页面一起滚。
                     let pitch = theme::detail_row_height() + ui.spacing().item_spacing.y;
                     let table_height = theme::detail_header_height()
