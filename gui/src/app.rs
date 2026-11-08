@@ -224,8 +224,9 @@ pub struct LltApp {
     platform: crate::Platform,
     /// 「数据」页的状态（当前库、线上版本、后台任务、备份列表）。
     data: crate::data::DataPage,
-    /// 上一帧「有没有输入框拿着键盘焦点」，只在变化时通知平台。
-    ime_focus: bool,
+    /// 上一帧拿着键盘焦点的控件（而不是「有没有焦点」）：从出发框跳到到达框时
+    /// 焦点一直是 `Some`，但输入法连接需要重挂一次。
+    ime_focus: Option<egui::Id>,
     /// 上一帧的可用尺寸（逻辑点），用来发现横竖屏/分屏变化。
     last_screen: egui::Vec2,
     /// 点击输入框后还要补几次「弹键盘」：egui 每次点击都会 interrupt_ime，
@@ -321,7 +322,7 @@ impl LltApp {
             persisted: settings,
             dirty_since: None,
             save_failed: false,
-            ime_focus: false,
+            ime_focus: None,
             last_screen: egui::Vec2::ZERO,
             ime_reshow: 0,
         };
@@ -395,26 +396,34 @@ impl LltApp {
                 crate::ImeInput::Enter => enter_key(),
             })
             .collect();
-        if !events.is_empty() {
+        let typed = !events.is_empty();
+        if typed {
             ctx.input_mut(|input| input.events.extend(events));
         }
         // 焦点变化时过一次 JNI：Android 靠它把输入法连接挂到自己的 View 上、并弹键盘。
-        // 键盘被系统收掉（返回键）后焦点不变，所以再补一条：界面里点一下就重弹，
-        // 否则得先点别的输入框才回来。键盘上的点击不会进 egui，不会被这里反复触发。
-        let focused = ctx.memory(|memory| memory.focused()).is_some();
+        //
+        // 三件事都会让 egui 调 `Memory::request_focus` → `interrupt_ime`，
+        // egui-winit 收到后就在帧末 `set_ime_allowed(false)` + `(true)`：
+        // Android 上等于先收键盘，「再弹」又被系统忽略（焦点在我们的桥 View 上）。
+        // 用户看到的是「打一个字键盘就没了」/「回车跳格后键盘没了」。所以这三处之后
+        // 都补两次 show（跨过那一帧的 hide）：
+        //   1. 焦点换到另一个输入框（`Some(id)` → `Some(other)` 也算）；
+        //   2. 点了一下界面（egui 每次点击都会 request_focus）；
+        //   3. 刚刚输入了内容（打字本身不该影响键盘）。
+        let focused = ctx.memory(|memory| memory.focused());
         let clicked = ctx.input(|input| input.pointer.any_click());
         if focused != self.ime_focus {
             self.ime_focus = focused;
             self.ime_reshow = 0;
-            ime.set_text_focus(focused);
-        } else if focused && clicked {
-            // 点输入框时 egui 会 request_focus → interrupt_ime，egui-winit 于是在
-            // 这一帧末尾 `set_ime_allowed(false)` + `(true)`：Android 上先收键盘，
-            // 而「再弹」因为焦点在我们的桥 View 上被系统忽略 —— 用户看到的就是
-            // 「点一下就收起来」。所以这一帧结束后补两次 show（跨过那次 hide）。
+            ime.set_text_focus(focused.is_some());
+            if focused.is_some() {
+                self.ime_reshow = 2;
+                ctx.request_repaint_after(std::time::Duration::from_millis(40));
+            }
+        } else if focused.is_some() && (clicked || typed) {
             self.ime_reshow = 2;
             ctx.request_repaint_after(std::time::Duration::from_millis(40));
-        } else if self.ime_reshow > 0 && focused {
+        } else if self.ime_reshow > 0 && focused.is_some() {
             self.ime_reshow -= 1;
             ime.ensure_shown();
             if self.ime_reshow > 0 {

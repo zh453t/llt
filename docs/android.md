@@ -107,13 +107,20 @@ GB2312 一级字库」做子集，得到 **919 KB** 的 `llt-bold.otf`，放在
 经 JNI 交给 Rust，再由界面转成 `egui::Event::Ime`。详见 `android/src/ime.rs` 与
 `android/app/src/main/java/org/llt/timetable/ImeBridge.java`。
 
-**为什么点输入框会把键盘弹掉**（已修）：egui 每次点击输入框都会
-`Memory::request_focus` → `interrupt_ime`，egui-winit 于是在帧末
-`set_ime_allowed(false)` + `(true)`——在 Android 上就是 `hide_soft_input` 收键盘，
-而「再弹」走 `showSoftInput(DecorView)`，因为焦点在我们的桥 View 上被系统忽略。
-所以点击之后不能立刻 show（那一帧结束时就被收掉了），而是标记「补弹两次」，
-40 ms 后重新请求一帧再 `showSoftInput`；并且**不要** `restartInput`
-（它会让键盘闪一下）。
+**为什么键盘会自己收起来**（已修）：egui 每次 `Memory::request_focus` 都会调
+`interrupt_ime`，egui-winit 于是在帧末 `set_ime_allowed(false)` + `(true)`——在 Android 上
+就是 `hide_soft_input` 收键盘，而「再弹」走 `showSoftInput(DecorView)`，因为焦点在我们的
+桥 View 上被系统忽略。触发 `request_focus` 的一共有三种日常操作，三种都要补弹：
+
+| 操作 | 为什么算 request_focus |
+|---|---|
+| 点一下输入框 | 点击会请求焦点 |
+| 焦点换到另一个输入框（出发 → 到达、按 Enter 跳格） | 新控件请求焦点，`Some(id)` 变成 `Some(other_id)` |
+| 打了一个字 | 输入事件本身会经过 egui 的焦点路径 |
+
+界面里记的是**焦点控件 id**（不是「有没有焦点」），三者任一发生时都标记「补弹两次」，
+40 ms 后重新请求一帧、再 `showSoftInput`；`ensure_shown` 只 show、**不** `restartInput`
+（后者会让键盘闪一下）。按系统返回键收键盘不经过这里，所以不会被强行弹回来。
 
 ### 2.6 文件选择器（SAF）
 
@@ -303,6 +310,7 @@ adb shell screencap -p /sdcard/s.png   # 无窗口也能截屏
 | 导出备份 | 系统「保存到」→ Downloads，`llt-timetable-20261114-20261108-0250.sqlite`（42.1 MB）|
 | 导入备份 | 系统选择器选中同一份 → 校验通过 → 「已导入 …（数据 20261114）」|
 | 系统栏 / 软键盘 | 状态栏 136 px、导航栏 132 px、键盘 912 px 三种缩进都正确让开了 |
+| 打字后键盘 | 车次页打一个字母、站站按 Enter 跳到到达框，键盘都保持弹出 |
 | 键盘弹出时的布局 | 键盘浮在界面之上，底栏与列表**原位不动**（`ADJUST_NOTHING` + 只算 systemBars） |
 | 返回手势 / 返回键 | 经由页 → 车次详情 → 退出应用，逐层后退；左右边缘滑动与返回键等价（真机实测） |
 | 横竖屏 | 旋转后自动重绘一次（比较可用尺寸），宽屏布局立刻生效 |
