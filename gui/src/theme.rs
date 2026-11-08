@@ -32,16 +32,16 @@ pub const FONT_MONO: f32 = 14.0;
 /// 鼠标下的输入框 / 按钮 / 日期选择器高度。
 const CONTROL_HEIGHT_MOUSE: f32 = 30.0;
 /// 触摸屏的控件高度：手指落点约 9 mm，30 点太紧。
-const CONTROL_HEIGHT_TOUCH: f32 = 44.0;
+const CONTROL_HEIGHT_TOUCH: f32 = 40.0;
 /// 鼠标下的结果列表行高。
 const LIST_ROW_HEIGHT_MOUSE: f32 = 28.0;
-const LIST_ROW_HEIGHT_TOUCH: f32 = 38.0;
+const LIST_ROW_HEIGHT_TOUCH: f32 = 34.0;
 /// 鼠标下的列表表头高度。
 const LIST_HEADER_HEIGHT_MOUSE: f32 = 30.0;
 const LIST_HEADER_HEIGHT_TOUCH: f32 = 32.0;
 /// 鼠标下的详情（停站表 / 经由表）行高。
 const DETAIL_ROW_HEIGHT_MOUSE: f32 = 26.0;
-const DETAIL_ROW_HEIGHT_TOUCH: f32 = 34.0;
+const DETAIL_ROW_HEIGHT_TOUCH: f32 = 30.0;
 /// 详情表格表头高度。
 const DETAIL_HEADER_HEIGHT_MOUSE: f32 = 26.0;
 const DETAIL_HEADER_HEIGHT_TOUCH: f32 = 30.0;
