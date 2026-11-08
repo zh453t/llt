@@ -3074,7 +3074,7 @@ fn line_set(line: &str) -> std::collections::HashSet<&str> {
 /// 三种标记互不干扰：
 /// - 停站：本站是车次的办客停站，站名用强调色；
 /// - 换线：与上一行不是同一条线路，线路名用警示色；
-/// - 线路所 / 未收录站点：弱化斜体，勾上「只看车站」后隐藏。
+/// - 非办客点（线路所 / 信号所 / 未收录站点）：弱化斜体，勾上「只看车站」后隐藏。
 fn via_table_ui(
     ui: &mut Ui,
     via: &[ViaPoint],
@@ -3160,7 +3160,7 @@ fn via_table_ui(
                                 "通过（不停站）"
                             }
                         } else {
-                            "线路所 / 未收录站点"
+                            "非办客站点（线路所 / 信号所 / 未收录等）"
                         });
                 });
                 row.col(|ui| {
@@ -3194,19 +3194,25 @@ fn via_legend_ui(ui: &mut Ui) {
     let weak = ui.visuals().weak_text_color();
     legend_item(ui, accent, "停站", "车次在该站办理客运，站名用蓝色");
     legend_item(ui, warn, "换线", "由此进入另一条线路，线路名用橙色");
+    // 不只线路所：数据里没有收录、或不办理客运的车站都会落到这一类，
+    // 所以图例用「非办客」而不是具体的「线路所」。
     legend_item(
         ui,
         weak,
-        "线路所",
-        "线路所 / 信号所等非办客点，可被「只看车站」隐藏",
+        "非办客",
+        "不办理客运的站点：线路所、信号所、未收录的货运站等，可被「只看车站」隐藏",
     );
 }
 
 fn legend_item(ui: &mut Ui, color: Color32, label: &str, tip: &str) {
-    ui.label(RichText::new("●").size(10.0).color(color));
-    ui.add_space(3.0);
-    ui.label(meta(label)).on_hover_text(tip);
-    ui.add_space(theme::GAP_S);
+    // 包一层 horizontal：放进 `horizontal_wrapped` 时整项作为一组换行，
+    // 不会把「非办客」拆成「非办」+「客」。
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
+        ui.label(RichText::new("●").size(10.0).color(color));
+        ui.label(meta(label)).on_hover_text(tip);
+    });
+    ui.add_space(theme::GAP_XS);
 }
 
 /// 折叠标题的三角箭头（不依赖字体里的几何符号）。
@@ -3539,44 +3545,65 @@ fn via_page_ui(
         .backdrop_color(egui::Color32::from_black_alpha(120))
         .show(&ctx, |ui| {
             ui.set_min_size(page - egui::vec2(24.0, 24.0));
-            ui.horizontal(|ui| {
-                if ui
-                    .add(
-                        egui::Button::new(
-                            RichText::new(if compact { "返回" } else { "关闭" })
-                                .size(theme::FONT_BODY),
-                        )
-                        .min_size(egui::vec2(64.0, theme::control_height())),
-                    )
-                    .clicked()
-                {
-                    *open = false;
-                }
-                ui.add_space(theme::GAP_S);
-                ui.label(bold("经由").size(theme::FONT_TITLE));
-            });
-            ui.add_space(2.0);
+            // 抬头压成两行：`返回 经由 车次 路由` 一行，`点数 · 里程 · 只看车站 · 图例` 一行。
+            // 这几行原本各占一整行（44 点），表格因此少了将近两行的显示高度。
             let route = format!("{} → {}", detail.summary.first, detail.summary.last);
             ui.horizontal(|ui| {
-                ui.label(bold(&detail.summary.code).size(theme::FONT_SECTION));
-                ui.add_space(theme::GAP_S);
-                ui.add(egui::Label::new(RichText::new(&route).size(theme::FONT_BODY)).truncate())
-                    .on_hover_text(&route);
+                ui.spacing_mut().interact_size.y = theme::header_height();
+                // 「只看车站」固定在右端：先把它的宽度留出来，左边标题区才不会
+                // 被截断的站名盖住（`with_layout(right_to_left)` 是叠加，不会挤）。
+                let reserve = 104.0;
+                let title_width = (ui.available_width() - reserve).max(120.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(title_width, theme::header_height()),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(if compact { "返回" } else { "关闭" })
+                                        .size(theme::FONT_BODY),
+                                )
+                                .min_size(egui::vec2(56.0, theme::header_height())),
+                            )
+                            .clicked()
+                        {
+                            *open = false;
+                        }
+                        ui.add_space(theme::GAP_S);
+                        ui.label(bold("经由").size(theme::FONT_SECTION));
+                        ui.add_space(theme::GAP_S);
+                        ui.label(bold(&detail.summary.code).size(theme::FONT_BODY));
+                        ui.add_space(theme::GAP_XS);
+                        ui.add(egui::Label::new(meta(&route)).truncate())
+                            .on_hover_text(&route);
+                    },
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().interact_size.y = theme::chip_height();
+                    ui.checkbox(stations_only, meta("只看车站"));
+                });
+            });
+            ui.add_space(2.0);
+            ui.scope(|ui| {
+                ui.spacing_mut().interact_size.y = theme::chip_height();
+                ui.spacing_mut().button_padding = theme::chip_padding();
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = theme::GAP_XS;
+                    let total_km = extras.via.last().map(|point| point.km).unwrap_or(0);
+                    let stations = extras.via.iter().filter(|point| point.is_station).count();
+                    ui.label(
+                        meta(format!(
+                            "{}点 · {total_km}km · 车站 {stations}",
+                            extras.via.len()
+                        ))
+                        .weak(),
+                    );
+                    ui.add_space(theme::GAP_S);
+                    via_legend_ui(ui);
+                });
             });
             ui.add_space(theme::GAP_XS);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = theme::GAP_S;
-                ui.label(meta(via_summary_text(&extras.via)).weak());
-                ui.add_space(theme::GAP_M);
-                ui.spacing_mut().interact_size.y = 24.0;
-                ui.checkbox(stations_only, meta("只看车站"));
-            });
-            ui.add_space(theme::GAP_XS);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = theme::GAP_XS;
-                via_legend_ui(ui);
-            });
-            ui.add_space(theme::GAP_S);
             // 整页也按整行取整，避免首屏最下面出现半截行。
             let height = ui.available_height();
             let pitch = theme::detail_row_height() + ui.spacing().item_spacing.y;
