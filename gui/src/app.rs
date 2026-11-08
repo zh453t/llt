@@ -30,6 +30,7 @@ impl Tab {
             Tab::Od => "站站查询",
             Tab::Train => "按车次",
             Tab::Station => "按车站",
+            Tab::Data => "数据",
         }
     }
 }
@@ -176,8 +177,10 @@ pub struct LltApp {
     train_back: Option<(i64, String)>,
     error: Option<String>,
     window_fitted: bool,
-    /// 平台差异：安全区、输入法、指针类型。
+    /// 平台差异：安全区、输入法、指针类型、数据目录。
     platform: crate::Platform,
+    /// 「数据」页的状态（当前库、线上版本、后台任务、备份列表）。
+    data: crate::data::DataPage,
     /// 上一帧「有没有输入框拿着键盘焦点」，只在变化时通知平台。
     ime_focus: bool,
     /// 最近一次读到的缩进。
@@ -211,8 +214,10 @@ impl LltApp {
 
         // 配置读取失败只降级，不阻断启动：返回默认值 + 一句提示。
         let (settings, config_warning) = config::load(&config_path);
+        let data_page = crate::data::DataPage::new(platform.dirs.clone());
         let mut app = Self {
             db: None,
+            data: data_page,
             db_path,
             db_error: None,
             data_version: None,
@@ -265,6 +270,7 @@ impl LltApp {
         // 打开就能打字：焦点落在恢复出来的那一页的输入框。
         app.focus_request = Some(app.focus_field(app.tab));
         app.open_db();
+        app.data.refresh(&app.db_path);
         // 提示放在 open_db 之后：恢复查询会先清空 `error`。
         if let Some(warning) = config_warning {
             app.error = Some(warning);
@@ -354,6 +360,7 @@ impl LltApp {
         match tab {
             Tab::Train => FocusField::Train,
             Tab::Station => FocusField::Station,
+            Tab::Data => self.focus_field(Tab::Od),
             Tab::Od if self.od_from.trim().is_empty() => FocusField::OdFrom,
             Tab::Od if self.od_to.trim().is_empty() => FocusField::OdTo,
             Tab::Od => FocusField::OdFrom,
@@ -753,7 +760,9 @@ impl LltApp {
                 (Tab::Od, "站站查询"),
                 (Tab::Train, "按车次"),
                 (Tab::Station, "按车站"),
+                (Tab::Data, "数据"),
             ];
+            let entered = self.tab;
             for (tab, label) in tabs {
                 if ui
                     .selectable_value(
@@ -766,6 +775,11 @@ impl LltApp {
                     // 点标签页（含重复点当前页）就把焦点交回该页的输入框。
                     self.focus_request = Some(self.focus_field(tab));
                 }
+            }
+
+            if self.tab != entered && self.tab == Tab::Data {
+                // 进数据页时重读一次：库可能刚被命令行或别的进程换掉。
+                self.data.refresh(&self.db_path);
             }
 
             // 宽屏时日期控件跟在标签页后面；窄屏单独一行，避免日期被换行拆散。
@@ -2072,43 +2086,6 @@ impl LltApp {
             Err(err) => self.error = Some(format!("查询车次失败：{err}")),
         }
     }
-
-    fn db_error_ui(&mut self, ui: &mut Ui) {
-        let top = ((ui.available_height() - 260.0) * 0.3).clamp(32.0, 160.0);
-        ui.add_space(top);
-        ui.vertical_centered(|ui| {
-            ui.label(bold("无法打开时刻表数据库").size(theme::FONT_TITLE));
-            ui.add_space(theme::GAP_S);
-            if let Some(error) = &self.db_error {
-                ui.label(
-                    RichText::new(error)
-                        .size(theme::FONT_META)
-                        .color(ui.visuals().error_fg_color),
-                );
-            }
-            ui.add_space(theme::GAP_M);
-            ui.label(meta("当前数据库路径").weak());
-            ui.add_space(2.0);
-            ui.label(
-                RichText::new(self.db_path.display().to_string())
-                    .size(theme::FONT_META)
-                    .monospace(),
-            );
-            ui.add_space(theme::GAP_M);
-            ui.label(
-                RichText::new(
-                    "默认从 out/timetable/llt-timetable.sqlite 读取。\n\
-                     也可以指定路径：llt-gui --db <path>，或设置环境变量 LLT_DB。",
-                )
-                .size(theme::FONT_HINT)
-                .weak(),
-            );
-            ui.add_space(theme::GAP_M);
-            if ui.add(egui::Button::new("重试")).clicked() {
-                self.open_db();
-            }
-        });
-    }
 }
 
 impl eframe::App for LltApp {
@@ -2205,9 +2182,24 @@ impl LltApp {
     /// 除系统栏缩进以外的主体布局。
     fn body(&mut self, ui: &mut Ui) {
         if self.db.is_none() {
+            // 没有库时直接落到数据页：第一次启动（Android 不再内置数据库）与
+            // 「库被删了」都该在同一个地方解决——下载 / 导入。
+            egui::Panel::top("header")
+                .frame(theme::panel_frame(ui))
+                .show(ui, |ui| self.header(ui));
             egui::CentralPanel::default()
                 .frame(theme::panel_frame(ui))
-                .show(ui, |ui| self.db_error_ui(ui));
+                .show(ui, |ui| {
+                    if let Some(error) = &self.db_error {
+                        ui.label(
+                            RichText::new(error)
+                                .size(theme::FONT_META)
+                                .color(ui.visuals().error_fg_color),
+                        );
+                        ui.add_space(theme::GAP_S);
+                    }
+                    self.data_ui(ui);
+                });
             return;
         }
 
@@ -2262,8 +2254,19 @@ impl LltApp {
                         self.station_ui(ui);
                     }
                     Tab::Od => self.od_ui(ui),
+                    Tab::Data => self.data_ui(ui),
                 }
             });
+    }
+
+    /// 「数据」页：当前库、检查更新、下载重建、备份导入导出。
+    fn data_ui(&mut self, ui: &mut Ui) {
+        let outcome = self.data.ui(ui, &self.db_path);
+        if outcome.reload_db {
+            // 库被换掉了：重开连接并把恢复的查询重跑一遍（见 `open_db`）。
+            self.open_db();
+            self.data.refresh(&self.db_path);
+        }
     }
 
     /// Android（触摸）上的车次详情：整页，而不是把列表压成半屏的底部面板。

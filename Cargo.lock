@@ -2098,9 +2098,11 @@ dependencies = [
 name = "llt-gui"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "eframe",
  "egui_extras",
  "jiff",
+ "lltdata",
  "lltdb",
  "rusqlite",
  "serde",

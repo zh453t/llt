@@ -18,6 +18,8 @@ egui_extras.workspace = true
 jiff.workspace = true
 rusqlite.workspace = true
 lltdb.workspace = true
+lltdata.workspace = true
+anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # 桌面与 Android 的渲染后端（wgpu）都要；其余特性按平台在下面分开给。

@@ -6,6 +6,7 @@
 
 mod app;
 pub mod config;
+pub mod data;
 pub mod fonts;
 pub mod theme;
 
@@ -119,6 +120,8 @@ pub struct Platform {
     pub ime: Option<Arc<dyn ImeBridge>>,
     /// 指针类型：决定控件尺寸、点击热区。
     pub pointer: theme::Pointer,
+    /// 数据页用的目录（导入备份、导出备份、构建临时目录）。
+    pub dirs: data::DataDirs,
 }
 
 impl Platform {
@@ -136,6 +139,7 @@ impl Platform {
             insets: Insets::fixed(ScreenInsets::default()),
             ime: None,
             pointer,
+            dirs: data::DataDirs::beside_exe(),
         }
     }
 }
