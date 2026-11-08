@@ -3142,8 +3142,16 @@ fn header_ui(
             close + previous + theme::GAP_S
         };
         let title_width = (ui.available_width() - reserve).max(96.0);
+        // 标题块的高度：单行取车次那一行，双行取两行之和；再按行高（= 右侧按钮高）
+        // 上下各留一半，让文字与按钮在垂直方向对齐。
+        let line_height = |id: egui::FontId| ui.ctx().fonts_mut(|fonts| fonts.row_height(&id));
+        let code_h = line_height(egui::FontId::new(theme::FONT_CODE, fonts::bold_family()));
+        let route_h = line_height(egui::FontId::proportional(theme::FONT_BODY));
+        let content_h = code_h + route_h;
+        let single_line_h = code_h.max(route_h);
+        let row_height = theme::control_height().max(content_h);
         ui.allocate_ui_with_layout(
-            egui::vec2(title_width, 0.0),
+            egui::vec2(title_width, row_height),
             Layout::top_down(Align::Min),
             |ui| {
                 // 一行放不下就整体换行（车次一行、始发 → 终到一行），
@@ -3169,23 +3177,30 @@ fn header_ui(
                         .x
                 });
                 let fits = code_width + theme::GAP_S + route_width <= title_width;
-                if compact && !fits {
+                let two_lines = compact && !fits;
+                let content = if two_lines { content_h } else { single_line_h };
+                // 单行时按「行盒」居中，字形（等宽数字 + 汉字）看上去仍比右侧按钮低
+                // 约 6 点：24 点字的下缘比 13 点按钮文字更低。往上抬一档补偿掉。
+                let bias = if two_lines { 0.0 } else { 9.0 };
+                ui.add_space(((row_height - content) / 2.0 - bias).max(0.0));
+                if two_lines {
+                    // 两行：车次在上、始发 → 终到在下，靠左对齐。
                     ui.label(bold(&detail.summary.code).size(theme::FONT_CODE));
                     ui.add(egui::Label::new(
                         RichText::new(&route).size(theme::FONT_BODY),
                     ))
                     .on_hover_text(&route);
-                } else {
-                    ui.horizontal_wrapped(|ui| {
+                } else if compact {
+                    ui.horizontal(|ui| {
                         ui.label(bold(&detail.summary.code).size(theme::FONT_CODE));
-                        if compact {
-                            ui.add_space(theme::GAP_S);
-                            ui.add(egui::Label::new(
-                                RichText::new(&route).size(theme::FONT_BODY),
-                            ))
-                            .on_hover_text(&route);
-                        }
+                        ui.add_space(theme::GAP_S);
+                        ui.add(egui::Label::new(
+                            RichText::new(&route).size(theme::FONT_BODY),
+                        ))
+                        .on_hover_text(&route);
                     });
+                } else {
+                    ui.label(bold(&detail.summary.code).size(theme::FONT_CODE));
                 }
             },
         );
