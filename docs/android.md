@@ -137,6 +137,10 @@ android/
   targetSdk 36 在 Android 15+ 上强制 edge-to-edge，正好与「自己问 WindowInsets」的做法一致。
 - 打包的两个 ABI：`arm64-v8a`（真机）+ `x86_64`（模拟器）。
 - `.so` 压缩进 APK：两个 ABI 加起来 30 MB，不压 APK 直接 29 MB；压完 13 MB。
+- 开了 **Gradle 配置缓存**（`org.gradle.configuration-cache=true`）：本机实测
+  `assembleRelease` 增量 1.84s → 1.45s（配置阶段 1.5s → 1.2s）。改 `build.gradle.kts`
+  或 `gradle.properties` 后第一次会重建缓存（多几秒）；怀疑缓存有问题时用
+  `--no-configuration-cache` 先排除。
 - 签名：`build.ps1 -Release` 首次运行用 keytool 生成 `android/keystore/llt-release.jks`
   （不进版本库）；要分发请换自己的证书。
 
