@@ -7,6 +7,7 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
+import android.view.WindowManager;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -42,6 +43,12 @@ public final class MainActivity extends NativeActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // 键盘只「浮」在界面之上：不缩窗口、也不平移窗口。
+        // 窗口一 resize，我们的 edge-to-edge 排版会跟着重算，列表/底栏就会跳；
+        // 位置稳定更重要，键盘遮挡由界面自己决定怎么处理（见 ScreenInsets）。
+        getWindow().setSoftInputMode(
+                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
+                        | WindowManager.LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED);
         // 输入法桥依赖 DecorView 已经建立，放在这里最稳。
         ImeBridge.install(this);
     }

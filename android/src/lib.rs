@@ -15,6 +15,13 @@ use android_activity::AndroidApp;
 use jni::objects::JObject;
 use jni::sys::jint;
 
+/// 软键盘弹出时，布局要不要跟着收缩。
+///
+/// `false`（当前）：键盘只是**浮在上面**，底栏和界面其它元素都不动——打字时位置稳定，
+/// 代价是键盘会盖住底栏，要按 查询/切页 得先收键盘。
+/// `true`：把键盘高度算进底部缩进，整个界面收缩到键盘上方（键盘一弹一收，列表位置会跳）。
+const SHRINK_FOR_IME: bool = false;
+
 /// 私有目录里的文件名。
 const DB_FILE: &str = "llt-timetable.sqlite";
 const CONFIG_FILE: &str = "llt-gui.json";
@@ -121,6 +128,9 @@ fn with_activity_string(app: &AndroidApp, method: &str) -> jni::errors::Result<O
 /// 低版本用已废弃的 `getSystemWindowInset*`（API 20 起就有）；
 /// 软键盘的高度不在那个「系统栏」里，API 30+ 要另外问 `WindowInsets.Type.ime()`。
 /// 取不到时返回 0，界面就当没有系统栏（顶栏会压到状态栏下，不致命）。
+///
+/// 软键盘高度只在 [`SHRINK_FOR_IME`] 为真时才计入底部：默认让键盘浮在界面上，
+/// 底栏与列表保持原位不动。
 fn system_bar_insets(app: &AndroidApp) -> llt_gui::ScreenInsets {
     read_insets(app).unwrap_or_default()
 }
@@ -162,11 +172,23 @@ fn read_insets(app: &AndroidApp) -> Option<llt_gui::ScreenInsets> {
             .unwrap_or(0)
             .max(0) as u32
     };
-    let top = system_inset(&mut env, "getSystemWindowInsetTop");
-    let left = system_inset(&mut env, "getSystemWindowInsetLeft");
-    let right = system_inset(&mut env, "getSystemWindowInsetRight");
-    let bottom = system_inset(&mut env, "getSystemWindowInsetBottom")
-        .max(ime_inset(&mut env, &window_insets));
+    // 废弃的 `getSystemWindowInset*` 在 adjustResize 下会把键盘高度算进 bottom，
+    // 所以底部优先用 `WindowInsets.Type.systemBars()`（API 30+，只含导航栏/状态栏）。
+    let bars = system_bar_insets_api30(&mut env, &window_insets);
+    let mut top = system_inset(&mut env, "getSystemWindowInsetTop");
+    let mut left = system_inset(&mut env, "getSystemWindowInsetLeft");
+    let mut right = system_inset(&mut env, "getSystemWindowInsetRight");
+    let mut bottom = system_inset(&mut env, "getSystemWindowInsetBottom");
+    if let Some(bars) = bars {
+        top = top.max(bars[0]);
+        left = left.max(bars[1]);
+        right = right.max(bars[2]);
+        // 底部只认系统栏：键盘默认不算进布局（见 SHRINK_FOR_IME）。
+        bottom = bars[3];
+    }
+    if SHRINK_FOR_IME {
+        bottom = bottom.max(ime_inset(&mut env, &window_insets));
+    }
 
     Some(llt_gui::ScreenInsets {
         top,
@@ -177,6 +199,39 @@ fn read_insets(app: &AndroidApp) -> Option<llt_gui::ScreenInsets> {
 }
 
 /// 软键盘的高度（API 30+ 才有 `WindowInsets.Type.ime()`，低版本返回 0）。
+/// `WindowInsets.getInsets(WindowInsets.Type.systemBars())`，API 30+ 才有。
+/// 返回 `[top, left, right, bottom]`（像素）；老系统上返回 `None`。
+fn system_bar_insets_api30(env: &mut jni::JNIEnv<'_>, window_insets: &JObject<'_>) -> Option<[u32; 4]> {
+    let read = (|| -> jni::errors::Result<[jint; 4]> {
+        let types = env.find_class("android/view/WindowInsets$Type")?;
+        let bars = env.call_static_method(types, "systemBars", "()I", &[])?.i()?;
+        let insets = env
+            .call_method(
+                window_insets,
+                "getInsets",
+                "(I)Landroid/graphics/Insets;",
+                &[jni::objects::JValue::Int(bars)],
+            )?
+            .l()?;
+        if insets.is_null() {
+            return Ok([0; 4]);
+        }
+        let field = |env: &mut jni::JNIEnv<'_>, name: &str| -> jni::errors::Result<jint> {
+            env.get_field(&insets, name, "I")?.i()
+        };
+        Ok([
+            field(env, "top")?,
+            field(env, "left")?,
+            field(env, "right")?,
+            field(env, "bottom")?,
+        ])
+    })();
+    match read {
+        Ok(values) => Some(values.map(|value| value.max(0) as u32)),
+        Err(_) => None,
+    }
+}
+
 fn ime_inset(env: &mut jni::JNIEnv<'_>, window_insets: &jni::objects::JObject<'_>) -> u32 {
     let mut read = || -> jni::errors::Result<jint> {
         let types = env.find_class("android/view/WindowInsets$Type")?;
