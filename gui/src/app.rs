@@ -1220,6 +1220,7 @@ impl LltApp {
         }
         let mut clear = false;
         let mut changed = false;
+        let mut input_response = None;
         // 不换行：车站标签 + 输入框 + 模糊 + 日期 必须并排（换行说明宽度算多了）。
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP_S;
@@ -1239,6 +1240,7 @@ impl LltApp {
             if response.changed() {
                 changed = true;
             }
+            input_response = Some(response);
             // 触摸屏上「清空 / 模糊 / 计数」在底栏（`station_bar`）。
             if !bar
                 && !self.station_query.trim().is_empty()
@@ -1318,29 +1320,8 @@ impl LltApp {
             }
         }
 
-        if !self.station_suggestions.is_empty() {
-            let current = self.station_board_for.clone();
-            let mut picked = None;
-            ui.add_space(theme::GAP_XS);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = theme::GAP_XS;
-                ui.spacing_mut().item_spacing.y = 2.0;
-                ui.label(meta("候选站").weak());
-                ui.add_space(theme::GAP_XS);
-                for station in &self.station_suggestions {
-                    let selected = current.as_deref() == Some(station.as_str());
-                    if ui
-                        .selectable_label(selected, RichText::new(station).size(theme::FONT_META))
-                        .clicked()
-                    {
-                        picked = Some(station.clone());
-                    }
-                }
-            });
-            if let Some(station) = picked {
-                self.station_query = station;
-                self.refresh_station();
-            }
+        if let Some(input) = input_response {
+            self.station_candidates_popup(ui, &input);
         }
 
         // 同城组内的车站筛选；勾选变化后按新集合重新查一次停站。
@@ -1401,6 +1382,68 @@ impl LltApp {
         }
     }
 
+    /// 候选站：贴在车站输入框下方的下拉列表。
+    ///
+    /// 原来是输入框下面那排 chip：单字查询最多 `STATION_SUGGESTIONS` 个候选，393 点的
+    /// 模拟器上要 4 行、347 点的手机上要 5 行（150–190 点，竖屏结果区的两到三成），
+    /// 结果表被挤得只剩几行。做成下拉之后候选只在需要时浮在结果上面，选完就收。
+    ///
+    /// 开合交给 egui 的 popup 记忆：点输入框 / 打字时打开，点别处或 Esc 关闭
+    /// （`CloseOnClickOutside` 不会因为点列表里的项而关掉，挑选由下面自己处理）。
+    fn station_candidates_popup(&mut self, ui: &mut Ui, input: &egui::Response) {
+        if self.station_suggestions.is_empty() {
+            return;
+        }
+        let popup_id = ui.make_persistent_id("station_candidates");
+        let mut open_command = None;
+        if input.clicked() || input.changed() {
+            open_command = Some(egui::SetOpenCommand::Bool(true));
+        }
+        let current = self.station_board_for.clone();
+        let width = input.rect.width().max(200.0);
+        let row_height = theme::list_row_height();
+        // 高度上限按窗口高度给：手机上键盘还占着下半屏，列表再高就顶到键盘上沿了。
+        // 一头一尾各留 4 行打底（候选少时不要缩成一条），最多 8 行左右。
+        let max_height =
+            (ui.ctx().content_rect().height() * 0.35).clamp(row_height * 4.0, row_height * 8.0);
+        let mut picked = None;
+        egui::Popup::from_response(input)
+            .id(popup_id)
+            .open_memory(open_command)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .gap(theme::GAP_XS)
+            .frame(egui::Frame::popup(ui.style()))
+            .show(|ui| {
+                ui.set_min_width(width);
+                egui::ScrollArea::vertical()
+                    .max_height(max_height)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        for station in &self.station_suggestions {
+                            let selected = current.as_deref() == Some(station.as_str());
+                            // 整行可点、整行高亮：`frame_when_inactive(selected)` 让
+                            // 未选中的行平时不画框，悬停/选中才有底色。
+                            let row =
+                                egui::Button::new(RichText::new(station).size(theme::FONT_BODY))
+                                    .selected(selected)
+                                    .frame_when_inactive(selected)
+                                    .min_size(egui::vec2(ui.available_width(), row_height));
+                            if ui.add(row).clicked() {
+                                picked = Some(station.clone());
+                            }
+                        }
+                    });
+            });
+        if let Some(station) = picked {
+            self.station_query = station;
+            self.refresh_station();
+            // 选完就结束编辑：键盘收起、列表收起（否则新查询又会带出 1 个候选）。
+            ui.ctx().memory_mut(|memory| memory.stop_text_input());
+            egui::Popup::close_id(ui.ctx(), popup_id);
+        }
+    }
+
     /// 按车站的结果半页：空状态或按到达时刻排序的停站表。
     fn station_results_ui(&mut self, ui: &mut Ui, bar: bool) {
         ui.add_space(theme::GAP_S);
@@ -1415,7 +1458,7 @@ impl LltApp {
                 empty_state(
                     ui,
                     "没有找到这个车站或同城组",
-                    "试试上方的候选站名或同城组。",
+                    "点输入框从候选站里挑一个，或试试同城组。",
                 );
             }
             return;
