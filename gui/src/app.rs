@@ -185,8 +185,6 @@ pub struct LltApp {
     /// 模糊搜索：把输入解析成同城组，匹配组内所有车站。
     station_fuzzy: bool,
     station_suggestions: Vec<String>,
-    /// 同城组名候选（仅模糊模式）。
-    station_city_suggestions: Vec<String>,
     /// 当前同城组的全部车站，供车站筛选。
     station_options: Vec<StationOption>,
     /// 车站筛选里勾选的车站下标。
@@ -293,7 +291,6 @@ impl LltApp {
             station_query: settings.station.query.clone(),
             station_fuzzy: settings.station.fuzzy,
             station_suggestions: Vec::new(),
-            station_city_suggestions: Vec::new(),
             station_options: Vec::new(),
             station_selected: BTreeSet::new(),
             station_board_for: None,
@@ -604,7 +601,6 @@ impl LltApp {
         let query = normalize_station(&self.station_query);
         if query.is_empty() {
             self.station_suggestions.clear();
-            self.station_city_suggestions.clear();
             self.station_options.clear();
             self.station_selected.clear();
             self.station_board_for = None;
@@ -614,7 +610,6 @@ impl LltApp {
 
         let mut error = None;
         let mut suggestions = Vec::new();
-        let mut cities = Vec::new();
         let mut fuzzy_selection = None;
         let mut exact_station = None;
 
@@ -624,10 +619,6 @@ impl LltApp {
                 Err(err) => error = Some(format!("车站查询失败：{err}")),
             }
             if self.station_fuzzy {
-                match db.city_suggestions(&query, 8) {
-                    Ok(rows) => cities = rows,
-                    Err(err) => error = Some(format!("同城候选查询失败：{err}")),
-                }
                 match db.same_city_selection(&query) {
                     Ok(selection) => fuzzy_selection = selection,
                     Err(err) => error = Some(format!("同城查询失败：{err}")),
@@ -646,7 +637,6 @@ impl LltApp {
         }
         self.error = error;
         self.station_suggestions = suggestions;
-        self.station_city_suggestions = cities;
 
         if let Some((title, stations)) = fuzzy_selection {
             self.apply_station_selection(title, stations);
@@ -1284,7 +1274,6 @@ impl LltApp {
         if clear {
             self.station_query.clear();
             self.station_suggestions.clear();
-            self.station_city_suggestions.clear();
             self.station_options.clear();
             self.station_selected.clear();
             self.station_board_for = None;
@@ -1292,32 +1281,6 @@ impl LltApp {
             self.focus_request = Some(FocusField::Station);
         } else if changed {
             self.refresh_station();
-        }
-
-        // 同城组候选（模糊模式）与普通车站候选分开显示，点击后都走同一条解析路径。
-        if self.station_fuzzy && !self.station_city_suggestions.is_empty() {
-            let current = self.station_board_for.clone();
-            let mut picked = None;
-            ui.add_space(theme::GAP_XS);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = theme::GAP_XS;
-                ui.spacing_mut().item_spacing.y = 2.0;
-                ui.label(meta("同城组").weak());
-                ui.add_space(theme::GAP_XS);
-                for city in &self.station_city_suggestions {
-                    let selected = current.as_deref() == Some(city.as_str());
-                    if ui
-                        .selectable_label(selected, RichText::new(city).size(theme::FONT_META))
-                        .clicked()
-                    {
-                        picked = Some(city.clone());
-                    }
-                }
-            });
-            if let Some(city) = picked {
-                self.station_query = city;
-                self.refresh_station();
-            }
         }
 
         if let Some(input) = input_response {
@@ -1458,7 +1421,7 @@ impl LltApp {
                 empty_state(
                     ui,
                     "没有找到这个车站或同城组",
-                    "点输入框从候选站里挑一个，或试试同城组。",
+                    "点输入框从候选站里挑一个；模糊模式下输入城市名可查同城所有车站。",
                 );
             }
             return;
@@ -2493,7 +2456,6 @@ impl LltApp {
                 self.station_query = name;
                 // 点的是具体车站，就该只查这一站，不要展开同城组。
                 self.station_fuzzy = false;
-                self.station_city_suggestions.clear();
                 self.refresh_station();
             }
             DetailLink::Train(code) => self.jump_to_train(&code),
@@ -2510,7 +2472,6 @@ impl LltApp {
         if self.station_query != point.station_query || self.station_fuzzy != point.station_fuzzy {
             self.station_query = point.station_query;
             self.station_fuzzy = point.station_fuzzy;
-            self.station_city_suggestions.clear();
             self.refresh_station();
         }
         self.select_train(point.train_index);
@@ -2913,7 +2874,6 @@ impl LltApp {
         {
             self.station_query.clear();
             self.station_suggestions.clear();
-            self.station_city_suggestions.clear();
             self.station_options.clear();
             self.station_selected.clear();
             self.station_board_for = None;
