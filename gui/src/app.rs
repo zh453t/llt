@@ -2576,23 +2576,25 @@ impl LltApp {
             return;
         }
 
+        // 触摸窄屏（手机）不建底部面板：列表和面板各分一半后谁都看不清，
+        // 改成「整车次一页」——详情直接 replace 掉列表，而不是叠一个会自己长高的模态。
+        // 触摸宽屏（平板横屏）右栏够用，仍保留列表与详情并排。
+        let touch_page = self.detail.is_some()
+            && self.platform.pointer == theme::Pointer::Touch
+            && ui.available_width() < WIDE_MIN_WIDTH;
+
         // 横屏（矮而宽）不画头部：标签页和版本都在左栏里，纵向空间让给内容。
         let landscape = self.bottom_bar()
             && ui.available_height() < theme::LANDSCAPE_MAX_HEIGHT
             && ui.available_width() >= theme::LANDSCAPE_MIN_WIDTH
             && self.detail.is_none();
-        if !landscape {
+        // 手机上看整页详情时也不画头部：那一页自己有车次抬头和「返回」，
+        // 上面再顶一条「路路通时刻表 + 数据 + 浅色」就是白占一行（竖屏横屏都一样）。
+        if !landscape && !touch_page {
             egui::Panel::top("header")
                 .frame(theme::panel_frame(ui))
                 .show(ui, |ui| self.header(ui));
         }
-
-        // 触摸窄屏（手机）不建底部面板：列表和面板各分一半后谁都看不清，
-        // 改成「整车次一页」——详情直接replace掉列表，而不是叠一个会自己长高的模态。
-        // 触摸宽屏（平板横屏）右栏够用，仍保留列表与详情并排。
-        let touch_page = self.detail.is_some()
-            && self.platform.pointer == theme::Pointer::Touch
-            && ui.available_width() < WIDE_MIN_WIDTH;
         if self.detail.is_some() && !touch_page {
             let available = ui.available_width();
             if available >= WIDE_MIN_WIDTH {
