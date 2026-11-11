@@ -196,8 +196,6 @@ pub struct LltApp {
     od_to: String,
     /// 模糊搜索：出发/到达都按同城组匹配。
     od_fuzzy: bool,
-    /// 出发/到达解析失败时的同城组名候选。
-    od_city_suggestions: Vec<String>,
     /// 结果表按实际出发站/到达站筛选。
     od_filter_from: Option<String>,
     od_filter_to: Option<String>,
@@ -298,7 +296,6 @@ impl LltApp {
             od_from: settings.od.from.clone(),
             od_to: settings.od.to.clone(),
             od_fuzzy: settings.od.fuzzy,
-            od_city_suggestions: Vec::new(),
             od_filter_from: None,
             od_filter_to: None,
             od_last: OdField::From,
@@ -699,7 +696,6 @@ impl LltApp {
         self.od_message = None;
         self.od_missing = None;
         self.od_suggestions.clear();
-        self.od_city_suggestions.clear();
         self.od_filter_from = None;
         self.od_filter_to = None;
 
@@ -755,19 +751,13 @@ impl LltApp {
             let query = if field == OdField::From { &from } else { &to };
             self.od_missing = Some(field);
             self.od_message = Some(if self.od_fuzzy {
-                format!("没有找到名为「{query}」的同城组或车站，试试候选。")
+                format!("没有找到名为「{query}」的同城组或车站，点输入框挑候选。")
             } else {
-                format!("没有名为「{query}」的车站，试试候选站名。")
+                format!("没有名为「{query}」的车站，点输入框挑候选站。")
             });
             match db.station_suggestions(query, 8) {
                 Ok(rows) => self.od_suggestions = rows,
                 Err(err) => self.error = Some(format!("车站查询失败：{err}")),
-            }
-            if self.od_fuzzy {
-                match db.city_suggestions(query, 8) {
-                    Ok(rows) => self.od_city_suggestions = rows,
-                    Err(err) => self.error = Some(format!("同城候选查询失败：{err}")),
-                }
             }
             return;
         }
@@ -1284,7 +1274,17 @@ impl LltApp {
         }
 
         if let Some(input) = input_response {
-            self.station_candidates_popup(ui, &input);
+            let picked = candidates_popup(
+                ui,
+                &input,
+                "station_candidates",
+                &self.station_suggestions,
+                self.station_board_for.as_deref(),
+            );
+            if let Some(station) = picked {
+                self.station_query = station;
+                self.refresh_station();
+            }
         }
 
         // 同城组内的车站筛选；勾选变化后按新集合重新查一次停站。
@@ -1342,68 +1342,6 @@ impl LltApp {
 
         if part == TabPart::Stacked {
             self.station_results_ui(ui, bar);
-        }
-    }
-
-    /// 候选站：贴在车站输入框下方的下拉列表。
-    ///
-    /// 原来是输入框下面那排 chip：单字查询最多 `STATION_SUGGESTIONS` 个候选，393 点的
-    /// 模拟器上要 4 行、347 点的手机上要 5 行（150–190 点，竖屏结果区的两到三成），
-    /// 结果表被挤得只剩几行。做成下拉之后候选只在需要时浮在结果上面，选完就收。
-    ///
-    /// 开合交给 egui 的 popup 记忆：点输入框 / 打字时打开，点别处或 Esc 关闭
-    /// （`CloseOnClickOutside` 不会因为点列表里的项而关掉，挑选由下面自己处理）。
-    fn station_candidates_popup(&mut self, ui: &mut Ui, input: &egui::Response) {
-        if self.station_suggestions.is_empty() {
-            return;
-        }
-        let popup_id = ui.make_persistent_id("station_candidates");
-        let mut open_command = None;
-        if input.clicked() || input.changed() {
-            open_command = Some(egui::SetOpenCommand::Bool(true));
-        }
-        let current = self.station_board_for.clone();
-        let width = input.rect.width().max(200.0);
-        let row_height = theme::list_row_height();
-        // 高度上限按窗口高度给：手机上键盘还占着下半屏，列表再高就顶到键盘上沿了。
-        // 一头一尾各留 4 行打底（候选少时不要缩成一条），最多 8 行左右。
-        let max_height =
-            (ui.ctx().content_rect().height() * 0.35).clamp(row_height * 4.0, row_height * 8.0);
-        let mut picked = None;
-        egui::Popup::from_response(input)
-            .id(popup_id)
-            .open_memory(open_command)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .gap(theme::GAP_XS)
-            .frame(egui::Frame::popup(ui.style()))
-            .show(|ui| {
-                ui.set_min_width(width);
-                egui::ScrollArea::vertical()
-                    .max_height(max_height)
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 2.0;
-                        for station in &self.station_suggestions {
-                            let selected = current.as_deref() == Some(station.as_str());
-                            // 整行可点、整行高亮：`frame_when_inactive(selected)` 让
-                            // 未选中的行平时不画框，悬停/选中才有底色。
-                            let row =
-                                egui::Button::new(RichText::new(station).size(theme::FONT_BODY))
-                                    .selected(selected)
-                                    .frame_when_inactive(selected)
-                                    .min_size(egui::vec2(ui.available_width(), row_height));
-                            if ui.add(row).clicked() {
-                                picked = Some(station.clone());
-                            }
-                        }
-                    });
-            });
-        if let Some(station) = picked {
-            self.station_query = station;
-            self.refresh_station();
-            // 选完就结束编辑：键盘收起、列表收起（否则新查询又会带出 1 个候选）。
-            ui.ctx().memory_mut(|memory| memory.stop_text_input());
-            egui::Popup::close_id(ui.ctx(), popup_id);
         }
     }
 
@@ -1633,6 +1571,9 @@ impl LltApp {
         // 汉字（5 × 15 点 = 75），所以输入框下限取 96 点。
         let swap_width = theme::control_height();
         let mut changed = false;
+        // 候选站下拉要贴在被编辑 / 没解析出来的那个输入框下面，所以留着两个 Response。
+        let mut from_response = None;
+        let mut to_response = None;
         // 触摸屏上「模糊 / 查询」在底栏（`od_bar`），这里只留两个输入框与交换按钮。
         let bar = self.bottom_bar();
         // 这一行不换行：出发 + ⇌ + 到达 必须并排（换行会让到达框单独掉到下一行）。
@@ -1658,6 +1599,7 @@ impl LltApp {
                 self.od_last = OdField::From;
                 changed = true;
             }
+            from_response = Some(from.clone());
             // 在出发框按 Enter 等于「出发填完了」：焦点直接落到到达框。
             // 单行输入框按 Enter 本来就会失焦，所以判 lost_focus + Enter 两个条件。
             // 不受宽屏限制：此时键盘已经在这个输入框上，跳一格不会额外弹键盘。
@@ -1688,6 +1630,7 @@ impl LltApp {
             if advance {
                 to.request_focus();
             }
+            to_response = Some(to.clone());
 
             if !bar {
                 // 边打边查，这个按钮只是兜底，别做成主操作。
@@ -1724,41 +1667,23 @@ impl LltApp {
             ui.label(meta(message).weak());
         }
 
+        // 候选站：贴在「没解析出来」的那个输入框下方，和车站页同一套下拉。
+        // 原来是在这里铺两排 chip（同城组 + 候选站），解析不出结果时会把结果区往下压。
         if let Some(field) = self.od_missing {
-            let mut picked = None;
-            if self.od_fuzzy && !self.od_city_suggestions.is_empty() {
-                ui.add_space(theme::GAP_XS);
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = theme::GAP_XS;
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.label(meta("同城组").weak());
-                    ui.add_space(theme::GAP_XS);
-                    for city in &self.od_city_suggestions {
-                        if ui.add(egui::Button::new(meta(city))).clicked() {
-                            picked = Some(city.clone());
-                        }
+            let (input, salt) = match field {
+                OdField::From => (from_response, "od_candidates_from"),
+                OdField::To => (to_response, "od_candidates_to"),
+            };
+            if let Some(input) = input {
+                let picked = candidates_popup(ui, &input, salt, &self.od_suggestions, None);
+                if let Some(station) = picked {
+                    match field {
+                        OdField::From => self.od_from = station,
+                        OdField::To => self.od_to = station,
                     }
-                });
-            }
-            ui.add_space(theme::GAP_XS);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = theme::GAP_XS;
-                ui.spacing_mut().item_spacing.y = 2.0;
-                ui.label(meta("候选站").weak());
-                ui.add_space(theme::GAP_XS);
-                for station in &self.od_suggestions {
-                    if ui.add(egui::Button::new(meta(station))).clicked() {
-                        picked = Some(station.clone());
-                    }
+                    self.od_last = field;
+                    self.refresh_od();
                 }
-            });
-            if let Some(station) = picked {
-                match field {
-                    OdField::From => self.od_from = station,
-                    OdField::To => self.od_to = station,
-                }
-                self.od_last = field;
-                self.refresh_od();
             }
             return;
         }
@@ -4562,6 +4487,72 @@ fn link_cell(ui: &mut Ui, text: RichText, tip: impl Into<egui::WidgetText>) -> b
 
 fn cell_layout() -> Layout {
     Layout::left_to_right(Align::Center)
+}
+
+/// 输入框下方的候选站下拉列表（车站页与站站页共用）。
+///
+/// 候选多的时候这比在输入框下面铺一排 chip 省得多：chip 排横着换行，单字查询的 24 个
+/// 候选在 393 点的手机上要 4 行、347 点上要 5 行（150–190 点，竖屏结果区的两到三成）。
+/// 列表浮在结果上面，最多 8 行、再多自己滚，选完就收。
+///
+/// 开合交给 egui 的 popup 记忆：点输入框 / 打字时打开，点别处或 Esc 关闭
+/// （`CloseOnClickOutside` 不会因为点列表里的项而关掉，挑选由这里处理）。
+/// 返回用户点中的那个站名。
+fn candidates_popup(
+    ui: &mut Ui,
+    input: &egui::Response,
+    salt: &'static str,
+    stations: &[String],
+    current: Option<&str>,
+) -> Option<String> {
+    if stations.is_empty() {
+        return None;
+    }
+    let popup_id = ui.make_persistent_id(salt);
+    let mut open_command = None;
+    if input.clicked() || input.changed() {
+        open_command = Some(egui::SetOpenCommand::Bool(true));
+    }
+    let width = input.rect.width().max(200.0);
+    let row_height = theme::list_row_height();
+    // 高度上限按窗口高度给：手机上键盘还占着下半屏，列表再高就顶到键盘上沿了。
+    // 一头一尾各留 4 行打底（候选少时不要缩成一条），最多 8 行左右。
+    let max_height =
+        (ui.ctx().content_rect().height() * 0.35).clamp(row_height * 4.0, row_height * 8.0);
+    let mut picked = None;
+    egui::Popup::from_response(input)
+        .id(popup_id)
+        .open_memory(open_command)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .gap(theme::GAP_XS)
+        .frame(egui::Frame::popup(ui.style()))
+        .show(|ui| {
+            ui.set_min_width(width);
+            egui::ScrollArea::vertical()
+                .max_height(max_height)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    for station in stations {
+                        let selected = current == Some(station.as_str());
+                        // 整行可点、整行高亮：`frame_when_inactive(selected)` 让未选中的
+                        // 行平时不画框，悬停/选中才有底色。
+                        let row = egui::Button::new(RichText::new(station).size(theme::FONT_BODY))
+                            .selected(selected)
+                            .frame_when_inactive(selected)
+                            .min_size(egui::vec2(ui.available_width(), row_height));
+                        if ui.add(row).clicked() {
+                            picked = Some(station.clone());
+                        }
+                    }
+                });
+        });
+    if picked.is_some() {
+        // 选完就结束编辑：键盘与列表一起收起（否则新查询又会带出新的候选）。
+        ui.ctx().memory_mut(|memory| memory.stop_text_input());
+        egui::Popup::close_id(ui.ctx(), popup_id);
+    }
+    picked
 }
 
 /// 一张「横竖都能滚」的固定列宽表格：外层负责滚动，表格只负责铺行列。
