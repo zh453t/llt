@@ -5,6 +5,7 @@
 //! 数据库解到应用私有目录，再把路径交给界面。方案见 `docs/android.md`。
 
 mod app;
+pub mod columns;
 pub mod config;
 pub mod data;
 pub mod files;

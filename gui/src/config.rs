@@ -52,6 +52,7 @@ pub struct Settings {
     pub station: StationSettings,
     pub od: OdSettings,
     pub detail: DetailSettings,
+    pub columns: ColumnSettings,
 }
 
 /// 与具体查询无关的界面状态。
@@ -82,6 +83,24 @@ impl ThemeChoice {
             Self::Dark => egui::ThemePreference::Dark,
         }
     }
+}
+
+/// 表格自定义列：每张表一份「显示哪些列」，`None` = 按窗口宽度自动（默认）。
+///
+/// 存的是列名（`status` / `code` / `from` …，见 [`crate::columns`]）：手写配置可读，
+/// 认不出的名字解析时直接丢掉，不会让整份配置回退默认值。列的顺序由代码固定，
+/// 这里只表达「显示/不显示」。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColumnSettings {
+    /// 站站结果表。
+    pub od: Option<Vec<String>>,
+    /// 车次结果表。
+    pub train: Option<Vec<String>>,
+    /// 车站结果表。
+    pub station: Option<Vec<String>>,
+    /// 车次详情里的停站表。
+    pub stops: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +154,7 @@ impl Default for Settings {
             station: StationSettings::default(),
             od: OdSettings::default(),
             detail: DetailSettings::default(),
+            columns: ColumnSettings::default(),
         }
     }
 }
@@ -286,6 +306,16 @@ mod tests {
             },
             detail: DetailSettings {
                 via_stations_only: false,
+            },
+            columns: ColumnSettings {
+                od: Some(vec![
+                    "status".to_owned(),
+                    "code".to_owned(),
+                    "arrive".to_owned(),
+                ]),
+                train: None,
+                station: Some(vec!["code".to_owned()]),
+                stops: None,
             },
         }
     }
