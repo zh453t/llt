@@ -356,6 +356,12 @@ fn apply_spacing(style: &mut egui::Style) {
     scroll.bar_width = scroll_bar_width();
     scroll.floating_width = scroll_bar_width();
     scroll.floating_allocated_width = scroll_bar_width() + 2.0;
+    // 拖到边界就停，别再往外拉出一截空白：egui 0.37 默认开着
+    // `KineticScrollStyle::rubber_band`（iOS 那种「越过边界有阻尼、松手弹回」）。
+    // 表格上的表现是「往右/往下拖出一片空白、松手回弹」，看起来像系统 overscroll，
+    // 实际是 `ScrollArea` 自己算的——关掉之后每帧末尾会把偏移夹回 `0..=max`，
+    // 越过边界一格都不动。惯性滑行（`decay_time`）保留，甩一下照样能滑。
+    scroll.kinetic.rubber_band = false;
 }
 
 struct WidgetPalette {

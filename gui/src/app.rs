@@ -1458,122 +1458,147 @@ impl LltApp {
         let wide = width >= theme::STATION_COLUMNS_MIN_WIDTH;
         let show_km = width >= 560.0;
         // 极窄（例如 900 点窗口右侧详情占掉一半）时收起「始发 → 终到」，
-        // 路线改在车次单元格的悬停提示里，避免表格横向溢出。
+        // 路线改在车次单元格的悬停提示里。
         // 同城多站时「车站」列优先于始发终到，路线再往后放。
         let show_route = width >= if show_station { 620.0 } else { 430.0 };
-        let header_top = ui.cursor().top();
-        let mut clicked = None;
-        let mut table = TableBuilder::new(ui)
-            .id_salt(salt)
-            .striped(true)
-            .sense(Sense::click())
-            .auto_shrink([false, false])
-            .min_scrolled_height(0.0)
-            .cell_layout(cell_layout())
-            .column(Column::exact(34.0))
-            .column(Column::initial(96.0).at_least(80.0));
-        if show_station {
-            table = table.column(Column::initial(86.0).at_least(72.0));
+
+        // 列清单是唯一来源：表头、数据行、列宽都按它铺，改一处三处同步。
+        #[derive(Clone, Copy)]
+        enum Col {
+            Status,
+            Code,
+            Station,
+            Arrive,
+            Depart,
+            Dwell,
+            Day,
+            Km,
+            Kind,
+            Route,
         }
-        table = table
-            .column(Column::initial(76.0).at_least(72.0))
-            .column(Column::initial(76.0).at_least(72.0));
+        let mut columns = vec![Col::Status, Col::Code];
+        if show_station {
+            columns.push(Col::Station);
+        }
+        columns.extend([Col::Arrive, Col::Depart]);
         if wide {
-            table = table
-                .column(Column::initial(64.0))
-                .column(Column::initial(58.0));
+            columns.extend([Col::Dwell, Col::Day]);
         }
         if show_km {
-            table = table.column(Column::initial(82.0).at_least(74.0));
+            columns.push(Col::Km);
         }
         if wide {
-            table = table.column(Column::initial(92.0).at_least(80.0));
+            columns.push(Col::Kind);
         }
         if show_route {
-            table = table.column(Column::remainder().at_least(110.0));
+            columns.push(Col::Route);
         }
 
-        table
-            .header(theme::list_header_height(), |mut header| {
-                header.col(|ui| table_head(ui, "状态"));
-                header.col(|ui| table_head(ui, "车次"));
-                if show_station {
-                    header.col(|ui| table_head(ui, "车站"));
+        // 列宽写死，不再让 egui 按可用宽度往里压：压到最后「发车」会被直接裁掉，
+        // 而手机上又没有横向滚动可拖（列宽溢出时 `TableBuilder` 只裁不滚）。
+        // 宁可横向滚：末列（始发 → 终到）吃掉剩余宽度，宽屏铺满，窄屏至少 110 点。
+        let spacing = ui.spacing().item_spacing.x;
+        let mut widths = Vec::with_capacity(columns.len());
+        for (index, column) in columns.iter().enumerate() {
+            let column_width = match column {
+                Col::Status => 34.0,
+                Col::Code => 96.0,
+                Col::Station => 86.0,
+                // 24:00 这种四位数 + 「+N」天要 74 点，76 点刚好不拆行。
+                Col::Arrive | Col::Depart => 76.0,
+                Col::Dwell => 64.0,
+                Col::Day => 58.0,
+                Col::Km => 82.0,
+                Col::Kind => 92.0,
+                Col::Route => {
+                    let used = widths.iter().sum::<f32>() + spacing * index as f32;
+                    (width - used).max(110.0)
                 }
-                header.col(|ui| table_head(ui, "到达"));
-                header.col(|ui| table_head(ui, "发车"));
-                if wide {
-                    header.col(|ui| table_head_right(ui, "停留"));
-                    header.col(|ui| table_head(ui, "第几天"));
+            };
+            widths.push(column_width);
+        }
+        let total = widths.iter().sum::<f32>() + spacing * columns.len().saturating_sub(1) as f32;
+        let pitch = theme::list_row_height() + ui.spacing().item_spacing.y;
+        let height = theme::list_header_height() + rows.len() as f32 * pitch + theme::GAP_S;
+
+        let mut clicked = None;
+        scrollable_table(
+            ui,
+            salt,
+            egui::vec2(total, height),
+            theme::list_header_height(),
+            |ui| {
+                let mut table = TableBuilder::new(ui)
+                    .id_salt(salt)
+                    .striped(true)
+                    .sense(Sense::click())
+                    .drag_to_scroll(egui::scroll_area::DragScroll::Never)
+                    .auto_shrink([false, false])
+                    .min_scrolled_height(0.0)
+                    .cell_layout(cell_layout());
+                for column_width in &widths {
+                    table = table.column(Column::exact(*column_width));
                 }
-                if show_km {
-                    header.col(|ui| table_head_right(ui, "本站里程"));
-                }
-                if wide {
-                    header.col(|ui| table_head(ui, "类型"));
-                }
-                if show_route {
-                    header.col(|ui| table_head(ui, "始发 → 终到"));
-                }
-            })
-            .body(|body| {
-                body.rows(theme::list_row_height(), rows.len(), |mut row| {
-                    let stop = rows[row.index()];
-                    let running = row.index() < running_count;
-                    row.set_selected(selected == Some(stop.train_index));
-                    if running_count > 0 && row.index() == running_count {
-                        row.set_overline(true);
-                    }
-                    row.col(|ui| {
-                        status_cell(ui, running);
+                table
+                    .header(theme::list_header_height(), |mut header| {
+                        for column in &columns {
+                            header.col(|ui| match column {
+                                Col::Status => table_head(ui, "状态"),
+                                Col::Code => table_head(ui, "车次"),
+                                Col::Station => table_head(ui, "车站"),
+                                Col::Arrive => table_head(ui, "到达"),
+                                Col::Depart => table_head(ui, "发车"),
+                                Col::Dwell => table_head_right(ui, "停留"),
+                                Col::Day => table_head(ui, "第几天"),
+                                Col::Km => table_head_right(ui, "本站里程"),
+                                Col::Kind => table_head(ui, "类型"),
+                                Col::Route => table_head(ui, "始发 → 终到"),
+                            });
+                        }
+                    })
+                    .body(|body| {
+                        body.rows(theme::list_row_height(), rows.len(), |mut row| {
+                            let stop = rows[row.index()];
+                            let running = row.index() < running_count;
+                            row.set_selected(selected == Some(stop.train_index));
+                            if running_count > 0 && row.index() == running_count {
+                                row.set_overline(true);
+                            }
+                            // 车站表的「+N天」说的是“这趟车从始发算起第几天”，
+                            // 与「第几天」列同义，但窄屏收起那一列时它是唯一的跨天线索。
+                            let day_offset = stop.day - 1;
+                            let route = format!("{} → {}", stop.first, stop.last);
+                            for column in &columns {
+                                row.col(|ui| match column {
+                                    Col::Status => status_cell(ui, running),
+                                    Col::Code => train_code_cell(
+                                        ui,
+                                        &stop.code,
+                                        (!show_route).then_some(route.as_str()),
+                                    ),
+                                    Col::Station => {
+                                        ui.add(egui::Label::new(&stop.station).truncate());
+                                    }
+                                    Col::Arrive => time_cell(ui, &stop.arrive, day_offset),
+                                    Col::Depart => time_cell(ui, &stop.depart, day_offset),
+                                    Col::Dwell => right_label(ui, format!("{} 分", stop.dwell_min)),
+                                    Col::Day => {
+                                        ui.label(format!("第 {} 天", stop.day));
+                                    }
+                                    Col::Km => right_label(ui, format!("{} km", stop.km)),
+                                    Col::Kind => {
+                                        ui.add(egui::Label::new(&stop.kind).truncate());
+                                    }
+                                    Col::Route => route_cell(ui, &stop.first, &stop.last),
+                                });
+                            }
+                            if row.response().clicked() {
+                                clicked = Some(stop.train_index);
+                            }
+                        });
                     });
-                    let route = format!("{} → {}", stop.first, stop.last);
-                    row.col(|ui| {
-                        train_code_cell(ui, &stop.code, (!show_route).then_some(route.as_str()));
-                    });
-                    if show_station {
-                        row.col(|ui| {
-                            ui.add(egui::Label::new(&stop.station).truncate());
-                        });
-                    }
-                    // 车站表的「+N天」说的是“这趟车从始发算起第几天”，
-                    // 与「第几天」列同义，但窄屏收起那一列时它是唯一的跨天线索。
-                    let day_offset = stop.day - 1;
-                    row.col(|ui| {
-                        time_cell(ui, &stop.arrive, day_offset);
-                    });
-                    row.col(|ui| {
-                        time_cell(ui, &stop.depart, day_offset);
-                    });
-                    if wide {
-                        row.col(|ui| {
-                            right_label(ui, format!("{} 分", stop.dwell_min));
-                        });
-                        row.col(|ui| {
-                            ui.label(format!("第 {} 天", stop.day));
-                        });
-                    }
-                    if show_km {
-                        row.col(|ui| {
-                            right_label(ui, format!("{} km", stop.km));
-                        });
-                    }
-                    if wide {
-                        row.col(|ui| {
-                            ui.add(egui::Label::new(&stop.kind).truncate());
-                        });
-                    }
-                    if show_route {
-                        row.col(|ui| {
-                            route_cell(ui, &stop.first, &stop.last);
-                        });
-                    }
-                    if row.response().clicked() {
-                        clicked = Some(stop.train_index);
-                    }
-                });
-            });
-        paint_header_line(ui, header_top, theme::list_header_height());
+            },
+        );
 
         clicked
     }
@@ -2037,91 +2062,83 @@ impl LltApp {
         selected: Option<i64>,
         salt: &str,
     ) -> Option<i64> {
-        // 六列 + 间距 ≈ 428 点：横屏右栏（约 450 点）放得下，最后一列不会被切；
+        // 六列 + 间距 ≈ 428 点：横屏右栏（约 450 点）放得下，最后一列吃掉差额；
         // 竖屏照旧横向滚动。「状态」两个汉字要 26 点，再小表头就被截成「…」。
         const STATUS: f32 = 30.0;
         const CODE: f32 = 74.0;
         const STATION: f32 = 78.0;
         const TIME: f32 = 64.0;
         let spacing = ui.spacing().item_spacing.x;
-        let total = STATUS + CODE + STATION + TIME + STATION + TIME + spacing * 5.0;
+        let natural = STATUS + CODE + STATION + TIME + STATION + TIME + spacing * 5.0;
+        let width = natural.max(ui.available_width());
+        // 末列（到达时间）吃掉剩余宽度：横屏右栏比六列宽时表格铺满，不留一条空。
+        let widths = [
+            STATUS,
+            CODE,
+            STATION,
+            TIME,
+            STATION,
+            TIME + (width - natural),
+        ];
         let pitch = theme::list_row_height() + ui.spacing().item_spacing.y;
-        let content_height = theme::list_header_height() + rows.len() as f32 * pitch + theme::GAP_S;
+        let height = theme::list_header_height() + rows.len() as f32 * pitch + theme::GAP_S;
 
         let mut clicked = None;
-        // 滚动条做成「浮动 + 细」：平时不占位、几乎看不见，拖动时才浮出来一点。
-        // 表格本来就是横向溢出可拖的，粗滚动条只会抢走一行高度和视觉重心。
-        let mut scroll_style = egui::style::ScrollStyle::floating();
-        scroll_style.bar_width = 8.0;
-        scroll_style.floating_width = 4.0;
-        ui.style_mut().spacing.scroll = scroll_style;
-        // 只用一个「横竖都能滚」的区域：表格自己不再抢拖动。
-        // 嵌套两个 ScrollArea 时，内层（表格的纵向滚动）会把手指拖动全吃掉，
-        // 结果横向只能拖滚动条——这正是之前的毛病。
-        egui::ScrollArea::both()
-            .id_salt((salt, "scroll"))
-            .auto_shrink([false, false])
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
-            .show(ui, |ui| {
-                // 给表格一个「比视口宽、比视口高」的容器，它才会按固定列宽铺开。
-                ui.allocate_ui_with_layout(
-                    egui::vec2(total, content_height),
-                    Layout::top_down(Align::Min),
-                    |ui| {
-                        let header_top = ui.cursor().top();
-                        TableBuilder::new(ui)
-                            .id_salt(salt)
-                            .striped(true)
-                            .sense(Sense::click())
-                            .drag_to_scroll(egui::scroll_area::DragScroll::Never)
-                            .auto_shrink([false, false])
-                            .cell_layout(cell_layout())
-                            .column(Column::exact(STATUS))
-                            .column(Column::exact(CODE))
-                            .column(Column::exact(STATION))
-                            .column(Column::exact(TIME))
-                            .column(Column::exact(STATION))
-                            .column(Column::exact(TIME))
-                            .header(theme::list_header_height(), |mut header| {
-                                header.col(|ui| table_head(ui, "状态"));
-                                header.col(|ui| table_head(ui, "车次"));
-                                header.col(|ui| table_head(ui, "出发站"));
-                                header.col(|ui| table_head(ui, "出发时间"));
-                                header.col(|ui| table_head(ui, "到达站"));
-                                header.col(|ui| table_head(ui, "到达时间"));
-                            })
-                            .body(|body| {
-                                body.rows(theme::list_row_height(), rows.len(), |mut row| {
-                                    let hit = rows[row.index()];
-                                    let running = row.index() < running_count;
-                                    row.set_selected(selected == Some(hit.train_index));
-                                    if running_count > 0 && row.index() == running_count {
-                                        row.set_overline(true);
-                                    }
-                                    row.col(|ui| status_cell(ui, running));
-                                    row.col(|ui| train_code_cell(ui, &hit.code, None));
-                                    row.col(|ui| {
-                                        ui.add(egui::Label::new(&hit.from_station).truncate())
-                                            .on_hover_text(&hit.from_station);
-                                    });
-                                    // 出发日期就是查询日期，不标「+N」；到达才可能跨天。
-                                    row.col(|ui| time_cell(ui, &hit.depart, 0));
-                                    row.col(|ui| {
-                                        ui.add(egui::Label::new(&hit.to_station).truncate())
-                                            .on_hover_text(&hit.to_station);
-                                    });
-                                    row.col(|ui| {
-                                        time_cell(ui, &hit.arrive, hit.arrive_day - hit.depart_day);
-                                    });
-                                    if row.response().clicked() {
-                                        clicked = Some(hit.train_index);
-                                    }
-                                });
+        scrollable_table(
+            ui,
+            salt,
+            egui::vec2(width, height),
+            theme::list_header_height(),
+            |ui| {
+                let mut table = TableBuilder::new(ui)
+                    .id_salt(salt)
+                    .striped(true)
+                    .sense(Sense::click())
+                    .drag_to_scroll(egui::scroll_area::DragScroll::Never)
+                    .auto_shrink([false, false])
+                    .cell_layout(cell_layout());
+                for width in widths {
+                    table = table.column(Column::exact(width));
+                }
+                table
+                    .header(theme::list_header_height(), |mut header| {
+                        header.col(|ui| table_head(ui, "状态"));
+                        header.col(|ui| table_head(ui, "车次"));
+                        header.col(|ui| table_head(ui, "出发站"));
+                        header.col(|ui| table_head(ui, "出发时间"));
+                        header.col(|ui| table_head(ui, "到达站"));
+                        header.col(|ui| table_head(ui, "到达时间"));
+                    })
+                    .body(|body| {
+                        body.rows(theme::list_row_height(), rows.len(), |mut row| {
+                            let hit = rows[row.index()];
+                            let running = row.index() < running_count;
+                            row.set_selected(selected == Some(hit.train_index));
+                            if running_count > 0 && row.index() == running_count {
+                                row.set_overline(true);
+                            }
+                            row.col(|ui| status_cell(ui, running));
+                            row.col(|ui| train_code_cell(ui, &hit.code, None));
+                            row.col(|ui| {
+                                ui.add(egui::Label::new(&hit.from_station).truncate())
+                                    .on_hover_text(&hit.from_station);
                             });
-                        paint_header_line(ui, header_top, theme::list_header_height());
-                    },
-                );
-            });
+                            // 出发日期就是查询日期，不标「+N」；到达才可能跨天。
+                            row.col(|ui| time_cell(ui, &hit.depart, 0));
+                            row.col(|ui| {
+                                ui.add(egui::Label::new(&hit.to_station).truncate())
+                                    .on_hover_text(&hit.to_station);
+                            });
+                            row.col(|ui| {
+                                time_cell(ui, &hit.arrive, hit.arrive_day - hit.depart_day);
+                            });
+                            if row.response().clicked() {
+                                clicked = Some(hit.train_index);
+                            }
+                        });
+                    });
+            },
+        );
 
         clicked
     }
@@ -4495,6 +4512,51 @@ fn link_cell(ui: &mut Ui, text: RichText, tip: impl Into<egui::WidgetText>) -> b
 
 fn cell_layout() -> Layout {
     Layout::left_to_right(Align::Center)
+}
+
+/// 一张「横竖都能滚」的固定列宽表格：外层负责滚动，表格只负责铺行列。
+///
+/// `TableBuilder` 自带的滚动区只有纵向：列宽超出视口时右边直接被裁掉，手势也拖不出
+/// 横向滚动（车站表在手机上第七列「发车」就是这样消失的）；而「外层管横向 + 内层管
+/// 纵向」两个 `ScrollArea` 也不行——内层会把手指拖动整段吃掉，横向只剩滚动条可拖。
+///
+/// 所以两种表格统一成：外层一个两向 `ScrollArea` 负责滚动，表格自己
+/// `drag_to_scroll(Never)`，列一律 `Column::exact`（外层得知道内容有多宽）。
+/// `size` 是表格的完整尺寸（表头 + 全部行）；比视口大才会滚，否则原样铺在左上角。
+/// 惯性滑行、边界停止都由 `ScrollArea` 的 `KineticScrollStyle` 决定
+/// （`theme::apply_spacing` 里把橡皮筋关了）。
+fn scrollable_table(
+    ui: &mut Ui,
+    salt: &str,
+    size: egui::Vec2,
+    header_height: f32,
+    build: impl FnOnce(&mut Ui),
+) {
+    // 滚动条做成「浮动 + 细」：平时不占位、几乎看不见，拖动时才浮出来一点。
+    // 表格本来就是横向溢出可拖的，粗滚动条只会抢走一行高度和视觉重心。
+    //
+    // 注意必须**继承**当前 style 再改宽度：新建一份 `ScrollStyle::floating()`
+    // 会把 `kinetic.rubber_band` 一并拉回默认的「开」，边界橡皮筋就又回来了。
+    let mut scroll_style = ui.spacing().scroll;
+    scroll_style.bar_width = 8.0;
+    scroll_style.floating_width = 4.0;
+    // 横向至少给到视口宽，免得末列算窄一点就在右边留一条背景。
+    let size = egui::vec2(size.x.max(ui.available_width()), size.y);
+    // `scope` 让样式改动只活在这个滚动区里，不污染同一页后面的控件。
+    ui.scope(|ui| {
+        ui.style_mut().spacing.scroll = scroll_style;
+        egui::ScrollArea::both()
+            .id_salt((salt, "scroll"))
+            .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+            .show(ui, |ui| {
+                ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
+                    let header_top = ui.cursor().top();
+                    build(ui);
+                    paint_header_line(ui, header_top, header_height);
+                });
+            });
+    });
 }
 
 /// 列表表头下方的细线：给表头一个明确的下边界，避免表头“浮”在数据行上。
