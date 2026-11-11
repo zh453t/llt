@@ -12,7 +12,7 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, RichText, Ui};
+use eframe::egui::{self, Align, Layout, RichText, Ui};
 
 use lltdata::local::LocalState;
 
@@ -263,36 +263,24 @@ impl DataPage {
         heading(ui, "当前数据");
         match &self.local {
             Some(state) if state.usable() => {
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = theme::GAP_S;
-                    ui.label(theme::mono(format!(
-                        "数据 {}",
-                        state.data_version.as_deref().unwrap_or("未知")
-                    )));
-                    ui.label(theme::mono(format!(
-                        "· 结构 v{}",
-                        state
-                            .schema_version
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "?".to_owned())
-                    )));
-                });
-                ui.label(theme::mono(format!(
-                    "构建于 {}",
-                    state.built_at.as_deref().unwrap_or("未知")
-                )));
-                let bytes = file_size(db_path);
-                // 大小、位置各占一行并带标签：路径很长，混在一行里读起来费劲。
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = theme::GAP_S;
-                    ui.label(meta("大小").weak());
-                    ui.label(theme::mono(size_text(bytes)));
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = theme::GAP_S;
-                    ui.label(meta("位置").weak());
-                    ui.label(theme::mono(db_path.display().to_string()));
-                });
+                // 五条信息统一成「标签 + 等宽值」：标签列等宽、行高一致。
+                // 原来是「数据 / 构建于」用等宽白字连排、「大小 / 位置」用灰色小字，
+                // 读起来像五段互不相干的东西，路径还把「位置」单独挤成一行。
+                let row = ui.text_style_height(&egui::TextStyle::Monospace) + theme::GAP_XS;
+                let version = state
+                    .data_version
+                    .clone()
+                    .unwrap_or_else(|| "未知".to_owned());
+                let schema = state
+                    .schema_version
+                    .map(|value| format!("v{value}"))
+                    .unwrap_or_else(|| "v?".to_owned());
+                let built_at = state.built_at.clone().unwrap_or_else(|| "未知".to_owned());
+                info_row(ui, "数据", version, row);
+                info_row(ui, "结构", schema, row);
+                info_row(ui, "构建于", built_at, row);
+                info_row(ui, "大小", size_text(file_size(db_path)), row);
+                info_row(ui, "位置", db_path.display().to_string(), row);
             }
             Some(state) => {
                 ui.label(body("数据不完整：").color(ui.visuals().error_fg_color));
@@ -850,6 +838,30 @@ fn file_name(path: &Path) -> String {
 
 fn file_size(path: &Path) -> u64 {
     std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+}
+
+/// 「标签 + 值」一行：标签列等宽、值为等宽字、行高统一。
+///
+/// 值太长（库的绝对路径）就在值列里换行，不把标签挤走——只有这一行会自然变高。
+fn info_row(ui: &mut Ui, label: &str, value: String, row_height: f32) {
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = theme::GAP_S;
+        ui.allocate_ui_with_layout(
+            egui::vec2(theme::INFO_LABEL_WIDTH, row_height),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                ui.label(meta(label).weak());
+            },
+        );
+        let width = ui.available_width();
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, row_height),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                ui.add(egui::Label::new(theme::mono(value)).wrap());
+            },
+        );
+    });
 }
 
 fn size_text(bytes: u64) -> String {

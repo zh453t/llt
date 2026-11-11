@@ -2199,11 +2199,12 @@ impl LltApp {
                 &mut header,
             );
             ui.add_space(theme::GAP_S);
-            // 经由条自带一条顶线；这时再画分隔线就成了两条并排的重复线。
             if has_via {
+                // 入口自带上下两条细线，这里再补 `ui.separator()` 就成了双线。
                 via_page_trigger(ui, &extras.via, &mut via_page_open);
+            } else {
+                ui.separator();
             }
-            ui.separator();
             ui.add_space(theme::GAP_S);
             egui::ScrollArea::vertical()
                 .id_salt("detail_page_scroll")
@@ -2464,17 +2465,15 @@ impl LltApp {
         };
         let label = point.label.clone();
         let mut go_back = false;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = theme::GAP_XS;
-            if ui
-                .add(egui::Button::new(meta(format!("← {label}"))))
-                .on_hover_text(format!("回到上一处：{label}"))
-                .clicked()
-            {
-                go_back = true;
-            }
-            ui.label(meta("刚才在停站表里点了车站").weak());
-        });
+        // 不再补一句「刚才在停站表里点了车站」：按钮本身就是 `← 天津`，
+        // 悬停提示也写了去向，旁边再挂一句解释只是噪音。
+        if ui
+            .add(egui::Button::new(meta(format!("← {label}"))))
+            .on_hover_text(format!("回到上一处：{label}"))
+            .clicked()
+        {
+            go_back = true;
+        }
         ui.add_space(theme::GAP_XS);
         if go_back {
             self.go_back();
@@ -2963,7 +2962,10 @@ impl LltApp {
         }
     }
 
-    /// 「查询」小节：三个查询页各自的模糊开关（车次页没有模糊）。
+    /// 「查询」小节：深浅色 + 两个模糊开关。
+    ///
+    /// 两行的标签列同宽、控件同高，右边才对得齐；选项都做成按钮/勾选框，
+    /// 而不是只有选中的那一个才有底色（未选中的看起来像正文，不像可点的东西）。
     fn query_settings_ui(&mut self, ui: &mut Ui) {
         ui.label(
             RichText::new("查询")
@@ -2971,16 +2973,22 @@ impl LltApp {
                 .family(fonts::bold_family()),
         );
         ui.add_space(theme::GAP_XS);
+        let label_width = theme::SETTING_LABEL_WIDTH;
         ui.horizontal(|ui| {
-            ui.label(setting_label("深浅色"));
-            ui.add_space(theme::GAP_XS);
+            setting_label_cell(ui, "深浅色", label_width);
             for (choice, label) in [
                 (config::ThemeChoice::System, "跟随系统"),
                 (config::ThemeChoice::Light, "浅色"),
                 (config::ThemeChoice::Dark, "深色"),
             ] {
+                // `Button::selectable` 只在选中时画边框，未选中的看起来像正文；
+                // `frame_when_inactive(true)` 让三个选项都长成按钮。
                 if ui
-                    .selectable_label(self.theme == choice, setting_label(label))
+                    .add(
+                        egui::Button::new(setting_label(label))
+                            .selected(self.theme == choice)
+                            .frame_when_inactive(true),
+                    )
                     .clicked()
                 {
                     self.set_theme(ui.ctx(), choice);
@@ -2988,13 +2996,14 @@ impl LltApp {
             }
         });
         ui.add_space(theme::GAP_XS);
-        ui.checkbox(&mut self.od_fuzzy, setting_label("站站：模糊匹配同城车站"))
-            .on_hover_text("出发/到达按城市或同城组匹配所有车站");
-        ui.checkbox(
-            &mut self.station_fuzzy,
-            setting_label("车站：模糊匹配同城车站"),
-        )
-        .on_hover_text("站名按城市/同城组匹配，包含同城所有车站");
+        ui.horizontal(|ui| {
+            setting_label_cell(ui, "模糊查询", label_width);
+            ui.checkbox(&mut self.od_fuzzy, setting_label("站站"))
+                .on_hover_text("出发 / 到达按城市或同城组匹配，包含同城所有车站");
+            ui.add_space(theme::GAP_S);
+            ui.checkbox(&mut self.station_fuzzy, setting_label("车站"))
+                .on_hover_text("按站名所在城市/同城组匹配，包含同城所有车站");
+        });
     }
 
     /// 「数据」页：当前库、检查更新、下载重建、备份导入导出。
@@ -3213,6 +3222,18 @@ fn meta(text: impl Into<String>) -> RichText {
 /// 设置页里的选项文字：用正文号，比弱化小字好读。
 fn setting_label(text: impl Into<String>) -> RichText {
     RichText::new(text).size(theme::FONT_BODY)
+}
+
+/// 设置页「标签 + 控件」一行里的标签格：固定宽度，右一列的控件才能对得齐。
+fn setting_label_cell(ui: &mut Ui, text: &str, width: f32) {
+    let height = ui.spacing().interact_size.y;
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, height),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.label(setting_label(text));
+        },
+    );
 }
 
 /// 真粗体：`RichText::strong()` 只改颜色，真正加粗要指定字体族。
@@ -3753,11 +3774,13 @@ fn via_state_id(train_index: i64) -> egui::Id {
     egui::Id::unique(("llt-via", train_index))
 }
 
-/// 「27 点 · 1318 km · 车站 23」，折叠标题、窄屏入口和经由页共用。
-fn via_summary_text(via: &[ViaPoint]) -> String {
+/// 经由入口的一行摘要：`61 途经点 · 1463 km`。
+///
+/// 只写这两项：点数、里程在经由页里能数出来，但入口收起时它们是最有用的两个量；
+/// 「车站 N」就省了——那要看「只看车站」勾上以后的条数，和入口无关。
+fn via_entry_summary(via: &[ViaPoint]) -> String {
     let total = via.last().map(|point| point.km).unwrap_or(0);
-    let stations = via.iter().filter(|point| point.is_station).count();
-    format!("{} 点 · {} km · 车站 {stations}", via.len(), total)
+    format!("{} 途经点 · {total} km", via.len())
 }
 
 /// 整行可点击的折叠标题，返回当前是否展开。
@@ -3786,7 +3809,8 @@ fn via_header_ui(ui: &mut Ui, id: egui::Id, summary: String) -> bool {
     row.add_space(theme::GAP_XS);
     row.label(bold("经由").size(theme::FONT_BODY));
     row.add_space(theme::GAP_S);
-    row.label(meta(summary).weak());
+    row.add(egui::Label::new(meta(summary.clone()).weak()).truncate())
+        .on_hover_text(summary);
     drop(row);
 
     let response = ui.interact(rect, id.with("hit"), Sense::click());
@@ -3928,6 +3952,8 @@ fn run_plan_page_ui(
 ) {
     // 只约束宽度：日历是定高的，高度交给内容，免得弹窗下面拖一大片空白。
     let width = (screen.x - 24.0).min(340.0);
+    // 与经由页同一个理由：`Area` 按 id 记尺寸，窗口/转屏改宽度后必须换一份状态。
+    let size_key = (width.round() as i32, screen.y.round() as i32);
     let frame = egui::Frame::new()
         .fill(ui.visuals().panel_fill)
         .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
@@ -3939,7 +3965,7 @@ fn run_plan_page_ui(
         open: &mut false,
     };
     let mut close = false;
-    let _ = egui::Modal::new(egui::Id::unique("llt-run-plan-page"))
+    let _ = egui::Modal::new(egui::Id::unique(("llt-run-plan-page", size_key)))
         .frame(frame)
         .backdrop_color(egui::Color32::from_black_alpha(120))
         .show(ui.ctx(), |ui| {
@@ -4038,34 +4064,43 @@ fn run_plan_ui(ui: &mut Ui, train: &TrainSummary, plan: &mut RunPlan<'_>, with_t
             ui.label(bold("开行计划").size(theme::FONT_BODY));
             ui.add_space(theme::GAP_S);
         }
-        // 先排右侧的翻月（从右往左），剩下的宽度才给区间文字：区间可能写到
-        // 「2050-12-31」，先画它会把两个按钮挤出页面（实测右侧箭头被裁掉）。
+        // 开行区间在标题下面已经写过一遍（`开行 2026-11-25 ~ 2080-12-31`），
+        // 这里不再重复：重复的区间会把翻月挤到只剩省略号。
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = theme::GAP_XS;
-            // 按钮边长跟着格子走：触摸屏的 44 点 interact_size 会把它们撑成高药丸。
-            ui.spacing_mut().interact_size = egui::vec2(cell, cell * 0.8);
+            // 翻月：方形按钮、与控件同高，字形放大到 19 点再加粗。
+            // 之前用 13 点的小字跟日历格子同宽，落在按钮里像两个小点，
+            // 几项之间又只隔 4 点，整排挤在一起。
+            let step = theme::control_height();
+            ui.spacing_mut().item_spacing.x = theme::GAP_S;
+            ui.spacing_mut().interact_size = egui::vec2(step, step);
+            // 箭头字号比按钮默认文字大，内边距收窄一点，按钮才不会被撑得比同行控件高。
+            ui.spacing_mut().button_padding = egui::vec2(theme::GAP_XS, 1.0);
+            let arrow = |glyph: &str| {
+                RichText::new(glyph)
+                    .size(theme::FONT_BODY + 4.0)
+                    .family(fonts::bold_family())
+            };
+            // `interact_size` 只管高度，按钮宽度还得显式给：不给就是「一个字 + 内边距」，
+            // 于是 19 点的箭头被塞进 13 点的窄条里（实测 13×37）。
             if ui
-                .add(egui::Button::new(meta("›")))
+                .add(egui::Button::new(arrow("›")).min_size(egui::vec2(step, step)))
                 .on_hover_text("下一个月")
                 .clicked()
             {
                 *plan.month = shift_month(*plan.month, 1);
             }
-            ui.label(meta(month_label(*plan.month)));
+            ui.label(
+                RichText::new(month_label(*plan.month))
+                    .size(theme::FONT_BODY)
+                    .weak(),
+            );
             if ui
-                .add(egui::Button::new(meta("‹")))
+                .add(egui::Button::new(arrow("‹")).min_size(egui::vec2(step, step)))
                 .on_hover_text("上一个月")
                 .clicked()
             {
                 *plan.month = shift_month(*plan.month, -1);
             }
-            // 剩余空间给区间，超宽用省略号收尾，不把这一行顶破。
-            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                ui.add(
-                    egui::Label::new(meta(date_window(train.date_from, train.date_to)).weak())
-                        .truncate(),
-                );
-            });
         });
     });
 
@@ -4237,7 +4272,7 @@ fn via_section_ui(
     if via.is_empty() {
         return;
     }
-    let open = via_header_ui(ui, via_state_id(train_index), via_summary_text(via));
+    let open = via_header_ui(ui, via_state_id(train_index), via_entry_summary(via));
     if open {
         ui.add_space(theme::GAP_XS);
         ui.horizontal(|ui| {
@@ -4284,7 +4319,12 @@ fn via_section_ui(
     }
 }
 
-/// 窄屏时停站表下方的经由入口：整行可点，打开独立经由页。
+/// 窄屏时停站表上方的经由入口：整行可点，打开独立经由页。
+///
+/// 上下内边距对称：行高是 `control_height()`、文字行在中间，上下各留同样多的空；
+/// 两条细线由本函数自己画（入口是一段独立的东西，不是表格的一部分）。
+/// 调用方前后只要各留 `GAP_S`，**不要**再补 `ui.separator()`——那样会变成两条线，
+/// 且入口看上去离上面的细线远、离下面的近。
 fn via_page_trigger(ui: &mut Ui, via: &[ViaPoint], open: &mut bool) {
     if via.is_empty() {
         return;
@@ -4302,13 +4342,10 @@ fn via_page_trigger(ui: &mut Ui, via: &[ViaPoint], open: &mut bool) {
             ui.visuals().widgets.hovered.weak_bg_fill,
         );
     }
-    // 与表格内容之间加一条细线，避免入口像是浮在空白里。
-    ui.painter().hline(
-        rect.x_range(),
-        rect.top(),
-        egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
-    );
-    let summary = via_summary_text(via);
+    let hairline = egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
+    ui.painter().hline(rect.x_range(), rect.top(), hairline);
+    ui.painter().hline(rect.x_range(), rect.bottom(), hairline);
+    let summary = via_entry_summary(via);
     let weak = ui.visuals().weak_text_color();
     let mut row = ui.new_child(
         egui::UiBuilder::new()
@@ -4371,12 +4408,19 @@ fn via_page_ui(
         .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
         .corner_radius(egui::CornerRadius::same(10))
         .inner_margin(12);
-    // 窄屏整页和宽屏弹窗用不同的 Area id，避免复用对方的尺寸/位置状态。
-    let response = egui::Modal::new(egui::Id::unique(("llt-via-page", compact)))
+    // Area 会按 id 记住上一帧的尺寸（`AreaState::size`）。横屏开过经由再转回
+    // 竖屏时，如果 id 不变就会沿用横屏那份 760 点的宽度，弹窗直接溢出屏幕——
+    // 「转屏时先关掉」也挡不住，因为下次打开还是同一个 id。所以把屏幕尺寸编进 id：
+    // 每种尺寸各算各的尺寸状态，横竖屏互不影响。
+    let size_key = (page.x.round() as i32, page.y.round() as i32);
+    let inner = page - egui::vec2(24.0, 24.0);
+    let response = egui::Modal::new(egui::Id::unique(("llt-via-page", compact, size_key)))
         .frame(frame)
         .backdrop_color(egui::Color32::from_black_alpha(120))
         .show(&ctx, |ui| {
-            ui.set_min_size(page - egui::vec2(24.0, 24.0));
+            // 只给下限，别再压上限：`set_max_width` 会把内容钉在「屏宽 - 48」
+            // 上，正好比经由表「显示里程列」的阈值（300 点）少半格，里程列就没了。
+            ui.set_min_size(inner);
             // 抬头压成两行：`返回 经由 车次 路由` 一行，`点数 · 里程 · 只看车站 · 图例` 一行。
             // 这几行原本各占一整行（44 点），表格因此少了将近两行的显示高度。
             let route = format!("{} → {}", detail.summary.first, detail.summary.last);
@@ -4423,23 +4467,11 @@ fn via_page_ui(
                 });
             });
             ui.add_space(2.0);
-            ui.scope(|ui| {
-                ui.spacing_mut().interact_size.y = theme::chip_height();
-                ui.spacing_mut().button_padding = theme::chip_padding();
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = theme::GAP_XS;
-                    let total_km = extras.via.last().map(|point| point.km).unwrap_or(0);
-                    let stations = extras.via.iter().filter(|point| point.is_station).count();
-                    ui.label(
-                        meta(format!(
-                            "{}点 · {total_km}km · 车站 {stations}",
-                            extras.via.len()
-                        ))
-                        .weak(),
-                    );
-                    ui.add_space(theme::GAP_S);
-                    via_legend_ui(ui);
-                });
+            // 只留图例：第二行原来还写「61点 · 1463km · 车站 38」，可这三个数
+            // 表里数得出来，抬头上也已经只有车次，留着只是把表格往下压一行。
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::GAP_XS;
+                via_legend_ui(ui);
             });
             ui.add_space(theme::GAP_XS);
             // 整页也按整行取整，避免首屏最下面出现半截行。
@@ -4613,7 +4645,7 @@ fn show_counts(ui: &mut Ui, prefix: Option<String>, running: usize, not_running:
     ui.add_space(theme::GAP_XS);
 }
 
-/// 底栏里的计数：`68 条 · ● 68 · ○ 0`，比 `show_counts` 更短。
+/// 底栏里的计数：`● 68 ○ 0`。两者之和就是总数，不再另写一遍「N 条」。
 fn counts_label(ui: &mut Ui, total: usize, running: usize, not_running: usize) {
     if total == 0 {
         return;
@@ -4628,7 +4660,6 @@ fn counts_label(ui: &mut Ui, total: usize, running: usize, not_running: usize) {
         ui.label(meta(running.to_string()));
         ui.label(RichText::new("○").size(9.0).color(weak));
         ui.label(meta(not_running.to_string()).weak());
-        ui.label(meta(format!("· {total} 条")).weak());
     });
 }
 
