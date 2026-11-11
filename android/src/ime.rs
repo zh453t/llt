@@ -76,6 +76,13 @@ extern "system" fn native_enter(_env: JNIEnv, _this: JObject) {
     push(ImeInput::Enter);
 }
 
+/// 用户自己收起了软键盘（返回键、键盘上的「收起」）。
+///
+/// Java 侧从窗口 insets 的 IME 可见性变化里看出来的（见 `ImeBridge.onApplyWindowInsets`）。
+extern "system" fn native_ime_hidden(_env: JNIEnv, _this: JObject) {
+    push(ImeInput::Hidden);
+}
+
 /// 把输入法接上：注册原生方法，再让 Java 侧把 1×1 的 View 挂到 DecorView 上。
 ///
 /// 失败不阻断启动——退化成修复前的样子（ASCII 能用、中文不能用），
@@ -104,6 +111,11 @@ pub fn attach(app: &AndroidApp) -> Option<Arc<Bridge>> {
                 name: "nativeEnter".into(),
                 sig: "()V".into(),
                 fn_ptr: native_enter as *mut c_void,
+            },
+            NativeMethod {
+                name: "nativeImeHidden".into(),
+                sig: "()V".into(),
+                fn_ptr: native_ime_hidden as *mut c_void,
             },
         ];
         env.register_native_methods(class, &methods)?;

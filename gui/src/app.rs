@@ -422,24 +422,39 @@ impl LltApp {
         let Some(ime) = self.platform.ime.clone() else {
             return;
         };
+        let mut dismissed = false;
         let events: Vec<egui::Event> = ime
             .drain()
             .into_iter()
-            .map(|input| match input {
-                crate::ImeInput::Commit(text) => egui::Event::Ime(egui::ImeEvent::Commit(text)),
-                crate::ImeInput::Preedit(text) => egui::Event::Ime(egui::ImeEvent::Preedit {
+            .filter_map(|input| match input {
+                crate::ImeInput::Commit(text) => {
+                    Some(egui::Event::Ime(egui::ImeEvent::Commit(text)))
+                }
+                crate::ImeInput::Preedit(text) => Some(egui::Event::Ime(egui::ImeEvent::Preedit {
                     text,
                     active_range_chars: None,
-                }),
+                })),
                 crate::ImeInput::Delete { before, after } => {
-                    egui::Event::Ime(egui::ImeEvent::DeleteSurrounding {
+                    Some(egui::Event::Ime(egui::ImeEvent::DeleteSurrounding {
                         before_chars: before,
                         after_chars: after,
-                    })
+                    }))
                 }
-                crate::ImeInput::Enter => enter_key(),
+                crate::ImeInput::Enter => Some(enter_key()),
+                // 用户自己把键盘收了（返回键 / 键盘上的「收起」）。系统不会告诉 egui，
+                // 输入框会一直保持焦点、光标还在闪，之后再点一下界面又把键盘弹回来。
+                // 这里替它放手：焦点一没，下面那段「补两次 show」也就不会触发。
+                crate::ImeInput::Hidden => {
+                    dismissed = true;
+                    None
+                }
             })
             .collect();
+        if dismissed {
+            // `stop_text_input` 只放开焦点，不动输入框里的文字。
+            ctx.memory_mut(|memory| memory.stop_text_input());
+            self.ime_reshow = 0;
+        }
         let typed = !events.is_empty();
         if typed {
             ctx.input_mut(|input| input.events.extend(events));

@@ -120,7 +120,31 @@ GB2312 一级字库」做子集，得到 **919 KB** 的 `llt-bold.otf`，放在
 
 界面里记的是**焦点控件 id**（不是「有没有焦点」），三者任一发生时都标记「补弹两次」，
 40 ms 后重新请求一帧、再 `showSoftInput`；`ensure_shown` 只 show、**不** `restartInput`
-（后者会让键盘闪一下）。按系统返回键收键盘不经过这里，所以不会被强行弹回来。
+（后者会让键盘闪一下）。
+
+#### 用户自己收起键盘（返回键 / 键盘上的「收起」）
+
+这条路径系统只改窗口 insets：输入法不通知 `InputConnection`，egui 更不知道。于是输入框
+一直保持焦点（光标还在闪），上面那套「补弹」和下一次点击又会把键盘弹回来——实测按返回
+收起后 5 秒内自己弹回。
+
+现在 `ImeBridge` 盯着窗口 insets 的 IME 可见性（API 30+ 用 `WindowInsets.Type.ime()`，
+更老的系统比较 `systemWindowInsetBottom` 与 stable inset），真收起来时回调
+`nativeImeHidden()`；界面收到 `ImeInput::Hidden` 就 `Memory::stop_text_input()` 放开焦点，
+并把「补弹」计数清零。点回输入框（新的焦点请求）照常弹键盘。
+
+难点是把「用户收的」和「我们自己抖的」分开，否则切个输入框键盘就再也不回来：
+
+| logcat 现象 | 归属 |
+|---|---|
+| 焦点一变，22 ms 里「显示 → 收起 → 显示 → 收起」 | winit 的 `set_ime_allowed(false)+(true)` 加 `restartInput`，自己抖的 |
+| 先一条 `onRequestHide … fromUser false`，1 ms 后 insets 收起 | 我们自己 `setActive(false)`（egui 焦点丢了） |
+| 只有 insets 收起，前后没有任何 `onRequestHide` | 用户按的 |
+
+判定规则：`setActive(false)` 之前先置 `hidingByUs`，这种收起不报；`setActive(true)` /
+`ensureActive()` 要**同步**（不能等 `post`，insets 回调会先到 1 毫秒）把 `churnUntilMs`
+推到 600 ms 之后，窗口内的收起一律算抖动。剩下没被认领的收起才算用户按的，
+`dismissed = true` 之后连 `ensureActive` 也挡住，直到下一次显式 `setActive(true)`。
 
 ### 2.6 文件选择器（SAF）
 
@@ -346,6 +370,7 @@ adb shell screencap -p /sdcard/s.png   # 无窗口也能截屏
 | 返回手势 / 返回键 | 经由页 → 车次详情 → 退出应用，逐层后退；左右边缘滑动与返回键等价（真机实测） |
 | 横竖屏 | 旋转后自动重绘一次（比较可用尺寸），宽屏布局立刻生效 |
 | 输入法 | 中文合成、`G12` 输入、回车触发查询都正常 |
+| 收起键盘（真机 + 模拟器） | 打字时按返回 / 键盘上的「收起」：键盘不再自己弹回（等 5 秒仍收着），输入框放开焦点（不再有聚焦边框），文字保留；再点输入框键盘照常弹出。切输入框（出发 → 到达）键盘不丢 |
 | 真机（vivo / Android 17 / arm64） | 覆盖安装保留原库；查询、详情、经由、底栏、输入法均正常；检查更新 20261108 → 20261114；状态栏 140 px 让开正确 |
 | 工具链升级后（JDK 25 / Gradle 9.9 / AGP 9.5.1 / compileSdk 36） | 真机与模拟器都重新安装验证通过；targetSdk 36 的强制 edge-to-edge 下缩进仍然正确；明文 HTTP 的版本接口照常可用 |
 | 底栏 | 标签页 + 动作行落在底部；车次页从「输入 + 计数 + 表格」变成「输入 + 表格」，多出约 2 行 |
