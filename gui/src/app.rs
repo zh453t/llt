@@ -1260,7 +1260,7 @@ impl LltApp {
             |ui, content_width| {
                 let (computed, _) =
                     column_widths(&specs, content_width, ui.spacing().item_spacing.x);
-                let mut widths = table_widths(ui, salt, &specs, computed);
+                let mut widths = table_widths(ui, salt, &specs, computed, Col::key);
                 apply_resize_drag(ui, salt, &specs, &mut widths, Col::resizable);
                 let active = table_active_column(ui, salt);
                 let table = exact_columns(
@@ -1578,7 +1578,7 @@ impl LltApp {
             |ui, content_width| {
                 let (computed, _) =
                     column_widths(&specs, content_width, ui.spacing().item_spacing.x);
-                let mut widths = table_widths(ui, salt, &specs, computed);
+                let mut widths = table_widths(ui, salt, &specs, computed, Col::key);
                 apply_resize_drag(ui, salt, &specs, &mut widths, Col::resizable);
                 let active = table_active_column(ui, salt);
                 let table = exact_columns(
@@ -2006,7 +2006,7 @@ impl LltApp {
             |ui, content_width| {
                 let (computed, _) =
                     column_widths(&specs, content_width, ui.spacing().item_spacing.x);
-                let mut widths = table_widths(ui, salt, &specs, computed);
+                let mut widths = table_widths(ui, salt, &specs, computed, Col::key);
                 apply_resize_drag(ui, salt, &specs, &mut widths, Col::resizable);
                 let active = table_active_column(ui, salt);
                 let table = exact_columns(
@@ -2421,28 +2421,24 @@ impl LltApp {
             let picked = columns::parse(&keys, columns::OdColumn::from_key);
             if !picked.is_empty() && self.od_columns.as_ref() != Some(&picked) {
                 self.od_columns = Some(picked);
-                reset_table_widths(ctx, WidthTable::Od);
             }
         }
         if let Some(keys) = take(ctx, WidthTable::Train.salt()) {
             let picked = columns::parse(&keys, columns::TrainColumn::from_key);
             if !picked.is_empty() && self.train_columns.as_ref() != Some(&picked) {
                 self.train_columns = Some(picked);
-                reset_table_widths(ctx, WidthTable::Train);
             }
         }
         if let Some(keys) = take(ctx, WidthTable::Station.salt()) {
             let picked = columns::parse(&keys, columns::StationColumn::from_key);
             if !picked.is_empty() && self.station_columns.as_ref() != Some(&picked) {
                 self.station_columns = Some(picked);
-                reset_table_widths(ctx, WidthTable::Station);
             }
         }
         if let Some(keys) = take(ctx, WidthTable::Stops.salt()) {
             let picked = columns::parse(&keys, columns::StopColumn::from_key);
             if !picked.is_empty() && self.stop_columns.as_ref() != Some(&picked) {
                 self.stop_columns = Some(picked);
-                reset_table_widths(ctx, WidthTable::Stops);
             }
         }
     }
@@ -3036,7 +3032,9 @@ impl LltApp {
                 .family(fonts::bold_family()),
         );
         ui.label(meta("点击按钮以配置相应表格的列。").weak());
-        ui.label(meta("在表格中按住表头的列分隔线并拖动可调整列宽；水平拖动表头可交换列的顺序。").weak());
+        ui.label(
+            meta("在表格中按住表头的列分隔线并拖动可调整列宽；水平拖动表头可交换列的顺序。").weak(),
+        );
         ui.add_space(theme::GAP_XS);
 
         let width = ui.available_width();
@@ -3103,7 +3101,6 @@ impl LltApp {
                 ColumnTable::Od => column_list(
                     ui,
                     "columns_od",
-                    WidthTable::Od,
                     &mut self.od_columns,
                     od_auto,
                     columns::OdColumn::ALL,
@@ -3113,7 +3110,6 @@ impl LltApp {
                 ColumnTable::Train => column_list(
                     ui,
                     "columns_train",
-                    WidthTable::Train,
                     &mut self.train_columns,
                     train_auto,
                     columns::TrainColumn::ALL,
@@ -3123,7 +3119,6 @@ impl LltApp {
                 ColumnTable::Station => column_list(
                     ui,
                     "columns_station",
-                    WidthTable::Station,
                     &mut self.station_columns,
                     station_auto,
                     columns::StationColumn::ALL,
@@ -3133,7 +3128,6 @@ impl LltApp {
                 ColumnTable::Stops => column_list(
                     ui,
                     "columns_stops",
-                    WidthTable::Stops,
                     &mut self.stop_columns,
                     stop_auto,
                     columns::StopColumn::ALL,
@@ -3204,7 +3198,6 @@ impl LltApp {
                         ColumnTable::Od => column_list(
                             ui,
                             "columns_od",
-                            WidthTable::Od,
                             &mut self.od_columns,
                             columns::OdColumn::auto(auto_width),
                             columns::OdColumn::ALL,
@@ -3214,7 +3207,6 @@ impl LltApp {
                         ColumnTable::Train => column_list(
                             ui,
                             "columns_train",
-                            WidthTable::Train,
                             &mut self.train_columns,
                             columns::TrainColumn::auto(auto_width),
                             columns::TrainColumn::ALL,
@@ -3224,7 +3216,6 @@ impl LltApp {
                         ColumnTable::Station => column_list(
                             ui,
                             "columns_station",
-                            WidthTable::Station,
                             &mut self.station_columns,
                             columns::StationColumn::auto(
                                 auto_width,
@@ -3237,7 +3228,6 @@ impl LltApp {
                         ColumnTable::Stops => column_list(
                             ui,
                             "columns_stops",
-                            WidthTable::Stops,
                             &mut self.stop_columns,
                             columns::StopColumn::auto(auto_width),
                             columns::StopColumn::ALL,
@@ -3794,7 +3784,7 @@ fn stops_table_ui(
         Layout::top_down(Align::Min),
         |ui| {
             let header_top = ui.cursor().top();
-            let mut widths = table_widths(ui, "train_stops", &specs, widths);
+            let mut widths = table_widths(ui, "train_stops", &specs, widths, Col::key);
             apply_resize_drag(ui, "train_stops", &specs, &mut widths, Col::resizable);
             let active = table_active_column(ui, "train_stops");
             let table = exact_columns(
@@ -5195,14 +5185,12 @@ fn cell_layout() -> Layout {
 fn column_list<C: Copy + PartialEq + Send + Sync + 'static>(
     ui: &mut Ui,
     salt: &'static str,
-    widths_of: WidthTable,
     picked: &mut Option<Vec<C>>,
     auto: Vec<C>,
     all: &[C],
     spec: fn(C) -> columns::Spec<C>,
     compact: bool,
 ) {
-    let before = picked.clone();
     if compact {
         // 弹窗里行距再紧一档：13 行一屏能放下，少滚一次。
         ui.spacing_mut().item_spacing.y = 2.0;
@@ -5343,10 +5331,6 @@ fn column_list<C: Copy + PartialEq + Send + Sync + 'static>(
 
     ui.data_mut(|data| data.insert_temp(order_id, order));
     ui.data_mut(|data| data.insert_temp(drag_id, drag_from));
-    // 列集合或顺序变了：拖动记下的宽度按老列序量的，作废重算。
-    if *picked != before {
-        reset_table_widths(ui.ctx(), widths_of);
-    }
 }
 
 /// 列清单的一行：左边拖动把手 + 复选框 + 名称。
@@ -5655,15 +5639,6 @@ impl WidthTable {
     }
 }
 
-/// 列集合或列序变了：之前那些宽度是按老列序量的，作废重算。
-fn reset_table_widths(ctx: &egui::Context, table: WidthTable) {
-    let salt = table.salt();
-    ctx.data_mut(|data| {
-        data.remove::<Vec<f32>>(egui::Id::unique((salt, "widths")));
-        data.remove::<i32>(egui::Id::unique((salt, "widths_seeded")));
-    });
-}
-
 /// 把配置里记住的列宽塞回界面状态，并记下「是按哪套布局量的」。
 fn seed_column_widths(ctx: &egui::Context, widths: &config::ColumnWidths) {
     for table in WidthTable::ALL {
@@ -5688,14 +5663,19 @@ fn seed_column_widths(ctx: &egui::Context, widths: &config::ColumnWidths) {
 /// 首次、可视宽度变化、列集合变化时按内容重算；其余时候保留用户拖出来的宽度
 /// （存在 egui 界面状态里，按 `salt` 区分；也会写进配置，下次启动照旧）。
 /// `computed` 是这一帧算出的自适应宽度。
-fn table_widths<C>(
+fn table_widths<C: Copy>(
     ui: &Ui,
     salt: &str,
     specs: &[columns::Spec<C>],
     computed: Vec<f32>,
+    key: fn(C) -> &'static str,
 ) -> Vec<f32> {
     let id = egui::Id::unique((salt, "widths"));
+    let keys_id = egui::Id::unique((salt, "widths_keys"));
     let seeded_id = egui::Id::unique((salt, "widths_seeded"));
+    let keys: Vec<&'static str> = specs.iter().map(|spec| key(spec.column)).collect();
+    let previous: Option<Vec<&'static str>> = ui.data(|data| data.get_temp(keys_id));
+    ui.data_mut(|data| data.insert_temp(keys_id, keys.clone()));
     // 启动时从配置恢复的那一份：只有「按同一套布局量的」才认，认完就清掉标记，
     // 之后窗口尺寸再变照旧重新自适应。
     let viewport = column_viewport(ui);
@@ -5709,8 +5689,31 @@ fn table_widths<C>(
     ui.data_mut(|data| data.remove::<i32>(seeded_id));
     let changed = column_layout_changed(ui, salt);
     let stored: Option<Vec<f32>> = ui.data(|data| data.get_temp(id));
+    let stored = stored.filter(|widths| widths.len() == specs.len());
+    let stored = stored.and_then(|widths| {
+        // 列序变了但列还是那几列（表头拖动、设置页拖清单）：宽度跟着自己那一列走，
+        // 不能整份丢掉——用户刚调好的宽度不能因为换个位置就回到默认。
+        // 真换了列（取消一个又勾上一个）就对不上号了，交给下面重算。
+        if let Some(previous) = previous.filter(|previous| *previous != keys) {
+            let same_set =
+                previous.len() == keys.len() && keys.iter().all(|key| previous.contains(key));
+            if !same_set {
+                return None;
+            }
+            let moved: Vec<f32> = keys
+                .iter()
+                .map(|key| {
+                    let index = previous.iter().position(|old| old == key).unwrap_or(0);
+                    widths.get(index).copied().unwrap_or_default()
+                })
+                .collect();
+            ui.data_mut(|data| data.insert_temp(id, moved.clone()));
+            return Some(moved);
+        }
+        Some(widths)
+    });
     match stored {
-        Some(widths) if (!changed || seeded) && widths.len() == specs.len() => widths,
+        Some(widths) if !changed || seeded => widths,
         _ => {
             ui.data_mut(|data| data.insert_temp(id, computed.clone()));
             computed

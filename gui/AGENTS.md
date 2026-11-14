@@ -87,9 +87,10 @@
   把宽度落进去，否则列宽晚一帧生效，快速滑动时分隔线会明显落后于手指。
 - **列宽记忆**：四张表（`od_results` / `train_results` / `station_board` / `train_stops`）的
   宽度工作副本在 egui 界面状态里（`(salt, "widths")`），`persist` 时读出来取整写进
-  `columns.widths.<表>`，启动时 `seed_column_widths` 塞回去。改列集合/列序、或可视宽度
-  变化超过 `VIEWPORT_SLACK` 时作废旧宽度（`reset_table_widths`）——宽度是按下标对应的。
-  新增可拖列宽的表时，往 `WidthTable` 里加一项，别另起一套。
+  `columns.widths.<表>`，启动时 `seed_column_widths` 塞回去。列序变了按列名把宽度重排
+  （`(salt, "widths_keys")` 记住上一帧的列序），**不要**整份丢掉——用户刚调好的宽度
+  不能因为换个位置就回到默认；只有列集合真的换了、或可视宽度变化超过 `VIEWPORT_SLACK`
+  才重算。新增可拖列宽的表时，往 `WidthTable` 里加一项，别另起一套。
 - **表头拖动换序**：`table_header_drag` 只把新顺序写进 `(salt, "column_order")`，
   由 `LltApp::apply_column_order` 下一帧落回 `*_columns`；拖动 id 用列名而不是下标
   （换完序这列会挪到别的格子，用下标拖动会断）。触摸屏要和调宽一样先长按。
