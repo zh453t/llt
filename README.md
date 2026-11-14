@@ -1,71 +1,112 @@
-# llt — 路路通离线时刻表
+# 路路通离线时刻表（llt）
 
-Rust workspace，把路路通（`com.lltskb.lltskb`）的离线数据包 `an.db` 变成可查询的 SQLite / CSV，
-并提供桌面查询界面与命令行工具。
+把「路路通」发布的离线数据包解码成本地 SQLite，**离线**查询全国铁路时刻表：
+按站到站查直达车、按车次查、按车站查当天经停，以及车次详情（停站表、经由、交路、
+车型担当、开行计划月历）。日常查询不联网，只有「更新数据」时才访问网络。
 
-| 路径 | 包名 | 作用 |
+同一份数据：Android 与桌面共用一套界面，另外还有一个命令行工具。
+
+| 入口 | 形态 | 说明 |
 |---|---|---|
-| `cli/` | `llt` | `build`：下载/解码 `an.db` → SQLite/CSV；`query`：查询数据库 |
-| `gui/` | `llt-gui` | egui 桌面查询界面（车次 / 车站 / 站站），只读 SQLite；另提供 lib `llt_gui` 给 Android 入口复用 |
-| `crates/lltdb/` | `lltdb` | 两个应用共用的只读查询层（含经由 / 交路 / 餐车，只依赖 `rusqlite` 与 `jiff`） |
-| `crates/lltdata/` | `lltdata` | 数据管线：下载 / 解包 / 解码 / 写库 / 版本比对，CLI、桌面与 Android 共用 |
-| `android/` | `llt-gui-android` | Android 平台胶水（入口、输入法、文件选择器）与 Gradle 工程，独立包、不参与 workspace，见 [`docs/android.md`](docs/android.md) |
-| `tools/` | — | Python 参考实现 `tools/decode_llt.py` |
-| `out/` | — | 已解码的数据；`out/timetable/README.md` 是格式、表结构与数据版本说明 |
-| `docs/` | — | 逆向报告与二进制格式说明 |
+| **Android** | APK（`org.llt.timetable`） | 触摸界面，整页滚动的车次详情；要求 Android 8.0 以上 |
+| **桌面** | `llt-gui.exe` | 单文件绿色程序，Windows 桌面（Linux / macOS 理论可编译，未验证） |
+| **命令行** | `llt` | 更新数据、查询、导出 CSV / JSON，见 [`cli/README.md`](cli/README.md) |
 
-依赖方向是 `llt-gui → lltdb`、`llt → lltdb`、`llt → lltdata → lltdb`；
-`lltdb` 不依赖 GUI 或网络栈，`lltdata` 不依赖 GUI。
-GUI 与 CLI 都是单文件可执行程序，静态链接，没有运行时依赖或进程间调用。
-`android/` 复用 `gui/` 里的 `llt_gui` 库（连同 `lltdata` 的数据管线），把同一套界面装进 APK。
+## 三种查询
 
-## 构建与测试
+三种查询都先选一个**查询日期**（默认今天，切换日期后旁边会出现「今天」按钮）：
+
+| 标签页 | 输入 | 结果 |
+|---|---|---|
+| **站站** | 出发站 + 到达站 | 可直达的车次、出发/到达时刻、历时、里程、跨天；可按实际出发站 / 到达站筛选 |
+| **车次** | `G1`、`K54`、`1461`、`G100/G97`，或只写号（`54` → G54/K54/Z54） | 匹配车次及其始发终到、类型、里程、开行区间 |
+| **车站** | 站名或城市名（实时候选） | 该站当日经停的全部列车，按到达/发车时刻排序 |
+
+- 输入即查询：没有单独的「查询」按钮；触摸屏上点一下输入框会清掉原来的文字，直接重输。
+- 结果列表把**当日开行**排在前、不开行排在后，前面标 `●` / `○`；底栏给出两组趟数。
+- 「模糊」按同城组匹配（城市名与车站名都能匹配），旧数据没有同城表时自动退化为单站。
+
+## 车次详情
+
+点列表里的车次进入详情（Android 是整页，桌面是右侧边栏 / 底部面板）：
+
+- **停站表**：到达、发车、停留、里程、天数、均速；列可自选、可拖宽、可拖表头换序，
+  宽度和顺序都会记住。
+- **经由**：点数、里程与线路表，可展开或放大看。
+- **交路**：车底周转的那几趟车，点开逐段列出「首站 时刻 → 末站 时刻」，车次号可直接跳转。
+- **车型 / 担当 / 餐车**：编组、担当企业与餐车位置。
+- **开行计划**：按查询日期算那天开不开行的月历（`●` 开行、斜杠 按周期停开、灰 区间外）。
+- 停站表里的站名也能点，直接跳到该车站的当日经停；标题旁的「← G105」是回头路。
+
+## 安装与使用
+
+### Android
+
+1. 安装 `app-release.apk`（Android 8.0 / API 26 以上）。
+2. **APK 不带数据库**（40 MB 左右，随包发不合适）：第一次启动落在「设置 → 数据」，
+   点「下载并重建」在应用里下载并解码；也可以「导入备份」用别人给的数据文件。
+3. 之后更新只需「检查更新 → 下载并重建」。
+
+### 桌面
+
+1. 运行 `llt-gui.exe`。
+2. 数据库 `llt-timetable.sqlite` 放在 exe 同目录即可；也可以用 `--db <path>` 或环境变量
+   `LLT_DB` 指定。没有库时界面同样落在「数据」页，可以在应用里下载或导入。
+3. 配置写在 exe 旁的 `llt-gui.json`（当前标签页、查询词、主题、列设置与列宽）。
+   绿色版：整个目录复制走，配置跟数据一起过去。只读目录写不进去时可用 `--config <path>`
+   或 `LLT_CONFIG` 指到可写位置。
+
+### 命令行
+
+```bash
+llt check                      # 比对本地库与线上版本（0 最新 / 3 有更新 / 4 本地库不可用）
+llt build                      # 已是最新则跳过；否则下载数据包、解码、生成 llt-timetable.sqlite
+llt build --csv -o out         # 只导出 stations / trains / stops.csv
+llt query train G1             # 查询车次（默认今天开行，附交路与经由）
+llt query od 北京 上海 --json  # 站到站直达，JSON 输出
+```
+
+不带子命令时打印帮助；完整用法见 [`cli/README.md`](cli/README.md)。
+
+## 数据
+
+- 数据来自路路通官方发布的离线数据包（`an.db`，实际是个 zip 容器），由本项目解码成
+  SQLite；版本号形如 `20261120`，界面标题栏的「数据 2026-11-20」就是它。
+- 本仓库只做解码与查询，**不提供数据包本身**，也不改动数据内容。
+- 数据库里读的主要是 `trains` / `stops` / `stations` 三张主表；交路、餐车、经由来自
+  附带的几张表，旧库缺这些表时对应信息自动隐藏，不影响三种查询。
+
+## 常见问题
+
+- **打开后落在「数据」页、显示「还没有时刻表数据」**：库文件不在 exe 旁边，或路径不对。
+  用 `--db` 指过去，或在应用里下载 / 导入一份。
+- **查不到某趟车 / 日期不对**：先看标题栏的数据版本，旧版本可能还没有这趟车；再确认查询
+  日期在该车的开行区间内（详情里的开行计划月历能看到）。
+- **为什么 Android 第一次要联网**：APK 不内置数据库，需要在应用里下载一次；之后离线可用。
+- **配置没保存**：程序所在目录不可写（`Program Files`、只读共享盘）。用 `--config` 或
+  `LLT_CONFIG` 指到可写位置。
+- **数据准不准**：时刻、里程、开行规律全部来自数据包，本项目只做换算与展示；判断口径见
+  [`docs/llt-format-reverse-engineering.md`](docs/llt-format-reverse-engineering.md)。
+
+## 从源码构建
 
 ```bash
 cargo build --workspace --release   # -> target/release/llt.exe、target/release/llt-gui.exe
 cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Android 的 APK 单独构建（不进 workspace，需要 NDK，见 [`docs/android.md`](docs/android.md)）：
+Android 的 APK 单独构建（需要 NDK 与 Gradle，见 [`docs/android.md`](docs/android.md)）：
 
 ```powershell
 pwsh -File android/build.ps1 -Release   # -> android/app/build/outputs/apk/release/app-release.apk
 ```
 
-APK **不内置数据库**（41 MB 的数据包随包发不合适）：第一次启动落在「数据」页，
-在应用里下载数据包并解码，或导入一份备份。
+参与开发请先看 [`CONTRIBUTING.md`](CONTRIBUTING.md)（提交规范）、
+[`AGENTS.md`](AGENTS.md)（项目结构、命令与验证流程）；
+界面行为与实现细节在 [`gui/README.md`](gui/README.md)，数据格式在
+[`docs/llt-format-reverse-engineering.md`](docs/llt-format-reverse-engineering.md)。
 
-## 数据
+## 说明
 
-```bash
-llt check                      # 比对本地库与线上版本（android.ver），只看不动
-llt build                      # 已是最新则跳过；否则下载 an.db、解包解码，生成 llt-timetable.sqlite
-llt build --csv -o out         # 只导出 stations/trains/stops.csv
-llt query train G1             # 查询（默认今天开行，附交路与经由）
-llt query od 北京 上海 --json  # 站到站直达，JSON 输出
-```
-
-不带子命令时打印帮助。用法、参数、数据版本写入方式见 [`cli/README.md`](cli/README.md)，
-SQLite 表结构见 [`out/timetable/README.md`](out/timetable/README.md)。
-
-## 界面配置
-
-`llt-gui` 把「下次打开还想保留」的少量状态写在**可执行文件旁**的 `llt-gui.json`
-（绿色版：整个目录复制走，配置跟数据一起过去）：
-
-| 配置项 | 界面位置 | 默认 |
-|---|---|---|
-| `ui.tab` | 当前标签页（`od` / `train` / `station`） | `od`（站站查询） |
-| `train.query` | 按车次：车次号 | 空 |
-| `station.query` / `station.fuzzy` | 按车站：车站名、「模糊」 | 空 / 关 |
-| `od.from` / `od.to` / `od.fuzzy` | 站站查询：出发、到达、「模糊」 | 空 / 关 |
-| `detail.via_stations_only` | 车次详情·经由：「只看车站」 | 开 |
-
-- 写入时机：停止输入 0.5 秒后（先写 `.tmp` 再改名覆盖），关窗时再兜底一次。
-- 读取失败（JSON 坏了）回退默认值，并把原文件改名 `llt-gui.json.bad`，界面顶部给一句提示。
-- 只读目录（`Program Files`、只读共享盘）写不进去时不阻断使用，可用 `--config <path>`
-  或环境变量 `LLT_CONFIG` 指到可写位置。
-- 查询日期、选中车次、同城车站勾选等会话现场不落盘。
-
-完整方案与取舍见 [`docs/gui-config.md`](docs/gui-config.md)。
+非官方工具，与路路通官方无关。数据版权归原提供方，本项目仅解码其公开发布的离线数据包，
+仅供个人查询使用；请自行遵守数据来源的服务条款。
