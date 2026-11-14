@@ -1151,12 +1151,13 @@ impl LltApp {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP_S;
             ui.label(RichText::new("车次").size(theme::FONT_BODY));
-            let response = ui.add(query_input(
+            let response = query_field(
+                ui,
                 "train",
                 &mut self.train_query,
                 "例如 G1 / K54 / 1461",
                 field_width,
-            ));
+            );
             // 车次页的日期紧挨输入框右边：看过哪天的车一目了然。
             date_picker(ui, &mut self.dates.train, "train_date", false);
             self.take_focus(ui, FocusField::Train, &response);
@@ -1356,12 +1357,7 @@ impl LltApp {
             let reserve = 52.0 + 112.0 + theme::GAP_S * 2.0;
             let field_width = (rest - reserve).clamp(90.0, 240.0);
             // 车站输入框不放占位符：候选站就在下面，写例子只是多一层噪音。
-            let response = ui.add(query_input(
-                "station",
-                &mut self.station_query,
-                "",
-                field_width,
-            ));
+            let response = query_field(ui, "station", &mut self.station_query, "", field_width);
             self.take_focus(ui, FocusField::Station, &response);
             if response.changed() {
                 changed = true;
@@ -1683,12 +1679,7 @@ impl LltApp {
             let field_width =
                 ((rest - swap_width - theme::GAP_S * 2.0) / 2.0 - INPUT_CHROME).clamp(96.0, 200.0);
             // 两个框不再带标签：占位符已经说明了是出发站还是到达站，省下的宽度给输入。
-            let from = ui.add(query_input(
-                "od-from",
-                &mut self.od_from,
-                "出发站",
-                field_width,
-            ));
+            let from = query_field(ui, "od-from", &mut self.od_from, "出发站", field_width);
             self.take_focus(ui, FocusField::OdFrom, &from);
             if from.changed() {
                 self.od_last = OdField::From;
@@ -1716,7 +1707,7 @@ impl LltApp {
                 changed = true;
             }
 
-            let to = ui.add(query_input("od-to", &mut self.od_to, "到达站", field_width));
+            let to = query_field(ui, "od-to", &mut self.od_to, "到达站", field_width);
             self.take_focus(ui, FocusField::OdTo, &to);
             if to.changed() {
                 self.od_last = OdField::To;
@@ -3362,6 +3353,26 @@ fn swap_glyph_size(ui: &Ui, button_size: f32) -> f32 {
 /// （`TabPart` 的 Input / Results / Stacked 三态），自动 id 跟着位置走，一刷新
 /// 就变成“另一个输入框”——egui 的焦点随即丢掉，表现是**只能打进第一个字符**
 /// （之后的输入法上屏事件因为没有焦点全被丢弃）。
+/// 画一个查询输入框，返回它的 `Response`。
+///
+/// 触摸屏上**点一下就把原来的字清掉**：手机上没有「把光标挪到某个字上改一下」的习惯，
+/// 点输入框基本都是要重输；清空算一次改动，调用方照旧按 `changed()` 重新查询。
+/// 鼠标端不动，还是普通的点击定位光标。
+fn query_field(
+    ui: &mut Ui,
+    salt: &'static str,
+    text: &mut String,
+    hint: &str,
+    width: f32,
+) -> egui::Response {
+    let mut response = ui.add(query_input(salt, text, hint, width));
+    if theme::pointer() == theme::Pointer::Touch && response.clicked() && !text.is_empty() {
+        text.clear();
+        response.mark_changed();
+    }
+    response
+}
+
 fn query_input<'a>(
     salt: &'static str,
     text: &'a mut String,

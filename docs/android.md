@@ -72,6 +72,10 @@ iOS 上填 `safe_area_insets`，Android 这边自己问 Java 侧
 想改回「界面收缩到键盘上方」，把 `android/src/lib.rs` 里的 `SHRINK_FOR_IME` 改成 `true`
 （同时要把 `ADJUST_NOTHING` 去掉或改成 `ADJUST_RESIZE`）。
 
+**触摸屏上点一下输入框就清空原来的字**（`query_field`）：手机上没有「把光标挪到某个字上
+改一下」的习惯，点输入框基本都是要重输；清空算一次改动，照旧触发边打边查。
+鼠标端不动，还是普通的点击定位光标。
+
 缩进量用 `egui::epaint::MarginF32`，**不要**用 `egui::Margin`：后者字段是 `i8`，
 软键盘在这台机器上是 983 px ≈ 357 点，换算时会被截断到 127——底栏就停在键盘后面不动。
 `MarginF32` 自带 `sum()` 与 `Rect - MarginF32`，拼安全矩形一行就能写完。
