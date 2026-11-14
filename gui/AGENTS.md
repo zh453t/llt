@@ -81,6 +81,20 @@
   按 `entry_natural_width` 定宽）；窄屏和手机整页仍是一行一个。格子内部间距显式 `add_space`
   给了，子 `Ui` 的 `item_spacing.x` 要置 0，否则会叠成两倍、定宽算不准就会挤成叠字。
 - **开行计划那格不写灰字摘要**：抬头下面已经写过开行区间，再挂一串「区间 · 月历」只是噪声。
+- **拖列宽要跟手**：位移按「按下那一刻的宽度 + 指针的绝对位移」算（`ResizeAnchor`），
+  不能用每帧的 `pointer.delta()` 累加——触摸屏上按住的头 0.4 秒、以及松手那一帧的位移
+  都会丢，列宽比手指走过的距离少一截。并且在**画表之前**先调 `apply_resize_drag`
+  把宽度落进去，否则列宽晚一帧生效，快速滑动时分隔线会明显落后于手指。
+- **列宽记忆**：四张表（`od_results` / `train_results` / `station_board` / `train_stops`）的
+  宽度工作副本在 egui 界面状态里（`(salt, "widths")`），`persist` 时读出来取整写进
+  `columns.widths.<表>`，启动时 `seed_column_widths` 塞回去。改列集合/列序、或可视宽度
+  变化超过 `VIEWPORT_SLACK` 时作废旧宽度（`reset_table_widths`）——宽度是按下标对应的。
+  新增可拖列宽的表时，往 `WidthTable` 里加一项，别另起一套。
+- **表头拖动换序**：`table_header_drag` 只把新顺序写进 `(salt, "column_order")`，
+  由 `LltApp::apply_column_order` 下一帧落回 `*_columns`；拖动 id 用列名而不是下标
+  （换完序这列会挪到别的格子，用下标拖动会断）。触摸屏要和调宽一样先长按。
+  拖动中的列靠 `table_active_column`（读 `resize_active` 与 `head_drag`）加粗变强调色，
+  和调宽共用一套提示。
 - **宽度阈值集中**在 `theme`：`WIDE_MIN_WIDTH`、`STACKED_DETAIL_MAX_WIDTH`、
   `INLINE_DATE_MIN_WIDTH`、`TRAIN_COLUMNS_MIN_WIDTH`、`STATION_COLUMNS_MIN_WIDTH`、
   `OD_COLUMNS_MIN_WIDTH`。新增响应式列时从这里取，不要写字面量。

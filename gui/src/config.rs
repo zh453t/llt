@@ -101,6 +101,31 @@ pub struct ColumnSettings {
     pub station: Option<Vec<String>>,
     /// 车次详情里的停站表。
     pub stops: Option<Vec<String>>,
+    /// 每张表拖出来的列宽，与上面四个字段一一对应。
+    pub widths: ColumnWidths,
+}
+
+/// 一张表拖出来的列宽。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColumnWidth {
+    /// 记下宽度时的可视宽度（`clip_rect` 宽度 × 2，与 `app::column_viewport` 同一口径）。
+    ///
+    /// 窗口/面板尺寸变了就不再套用旧列宽：按旧宽度排出来的表在新宽度下要么填不满、
+    /// 要么撑出横向滚动条，不如重新自适应一遍。
+    pub viewport: i32,
+    /// 每列宽度（逻辑点，取整），与那张表当前的列一一对应。
+    pub widths: Vec<u16>,
+}
+
+/// 各表的列宽，分开存：改一张表的列不会动到别的表。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColumnWidths {
+    pub od: Option<ColumnWidth>,
+    pub train: Option<ColumnWidth>,
+    pub station: Option<ColumnWidth>,
+    pub stops: Option<ColumnWidth>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -316,6 +341,15 @@ mod tests {
                 train: None,
                 station: Some(vec!["code".to_owned()]),
                 stops: None,
+                widths: ColumnWidths {
+                    od: Some(ColumnWidth {
+                        viewport: 861,
+                        widths: vec![36, 88, 66],
+                    }),
+                    train: None,
+                    station: None,
+                    stops: None,
+                },
             },
         }
     }

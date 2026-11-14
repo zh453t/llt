@@ -281,6 +281,8 @@ pub struct LltApp {
     inset_probe_at: Option<Instant>,
     /// 上一次报给平台的「系统栏图标是否要深色」（浅色主题）；`None` = 还没报过。
     bars_light: Option<bool>,
+    /// 上一次从界面状态里读出来的列宽（落盘快照用；`on_exit` 拿不到 `ctx`）。
+    column_widths: config::ColumnWidths,
     /// 详情页的身份：每打开一次车次就加一。
     ///
     /// 详情里的滚动区、停站表都把它拼进 `id_salt`，于是换车次就是一份全新的滚动状态——
@@ -395,6 +397,7 @@ impl LltApp {
             platform,
             safe_area: crate::ScreenInsets::default(),
             inset_probe_at: None,
+            column_widths: settings.columns.widths.clone(),
             detail_gen: 0,
             bars_light: None,
             config_path,
@@ -405,6 +408,9 @@ impl LltApp {
             last_screen: egui::Vec2::ZERO,
             ime_reshow: 0,
         };
+        // 列宽记忆：把配置里记住的列宽塞回界面状态（绘制时按它排），
+        // 同时记住「按哪套布局存的」——窗口尺寸变了就不再硬套。
+        seed_column_widths(&cc.egui_ctx, &app.persisted.columns.widths);
         // 打开就能打字：焦点落在恢复出来的那一页的输入框。
         app.focus_request = Some(app.focus_field(app.tab));
         app.open_db();
@@ -617,8 +623,36 @@ impl LltApp {
                     .stop_columns
                     .as_deref()
                     .map(|picked| columns::keys(picked, columns::StopColumn::key)),
+                widths: self.column_widths.clone(),
             },
         }
+    }
+
+    /// 从界面状态里读各表当前的列宽（只记拖过、或者从配置里恢复回来的）。
+    ///
+    /// 宽度的工作副本在 egui 的界面状态里（`table_widths` 那一套），这里读出来取整；
+    /// 这一轮还没画过的表沿用上次的值，不要抹掉。
+    fn live_column_widths(&self, ctx: &egui::Context) -> config::ColumnWidths {
+        let mut widths = config::ColumnWidths::default();
+        for table in WidthTable::ALL {
+            let stored: Option<Vec<f32>> =
+                ctx.data(|data| data.get_temp(egui::Id::unique((table.salt(), "widths"))));
+            let viewport: Option<i32> =
+                ctx.data(|data| data.get_temp(egui::Id::unique(("table_viewport", table.salt()))));
+            let live = match (stored, viewport) {
+                (Some(stored), Some(viewport)) if !stored.is_empty() => Some(config::ColumnWidth {
+                    viewport,
+                    widths: stored
+                        .iter()
+                        .map(|width| width.round().clamp(1.0, f32::from(u16::MAX)) as u16)
+                        .collect(),
+                }),
+                _ => None,
+            };
+            let kept = live.or_else(|| table.get(&self.persisted.columns.widths).cloned());
+            table.set(&mut widths, kept);
+        }
+        widths
     }
 
     /// 帧首调用：状态与上次落盘的快照不同时，停手 [`SAVE_DEBOUNCE`] 后写一次。
@@ -626,6 +660,7 @@ impl LltApp {
     /// 放在帧首而不是帧尾，是为了覆盖所有提前 `return` 的分支（库打不开时也会
     /// 记下当前状态）；快照最多落后一帧，对这几个开关和输入框没有影响。
     fn persist(&mut self, ctx: &egui::Context) {
+        self.column_widths = self.live_column_widths(ctx);
         let snapshot = self.settings();
         if snapshot == self.persisted {
             self.dirty_since = None;
@@ -1226,6 +1261,7 @@ impl LltApp {
                 let (computed, _) =
                     column_widths(&specs, content_width, ui.spacing().item_spacing.x);
                 let mut widths = table_widths(ui, salt, &specs, computed);
+                apply_resize_drag(ui, salt, &specs, &mut widths, Col::resizable);
                 let active = table_active_column(ui, salt);
                 let table = exact_columns(
                     TableBuilder::new(ui)
@@ -1240,12 +1276,14 @@ impl LltApp {
                 // 单元格右边界直接取自表头实际画出来的位置：滚动、内边距都由它兜底，
                 // 不用自己拿宽度累加（累加对不上只会在滚动时偏几十点）。
                 let mut edges: Vec<f32> = Vec::with_capacity(specs.len());
+                let mut cells: Vec<egui::Rect> = Vec::with_capacity(specs.len());
                 let mut first_row: Option<egui::Rect> = None;
                 table
                     .header(theme::list_header_height(), |mut header| {
                         for (index, spec) in specs.iter().enumerate() {
                             header.col(|ui| {
                                 edges.push(ui.max_rect().right());
+                                cells.push(ui.max_rect());
                                 column_head(ui, spec, active == Some(index));
                             });
                         }
@@ -1284,6 +1322,7 @@ impl LltApp {
                             }
                         });
                     });
+                table_header_drag(ui, salt, &specs, &cells, Col::key, Col::resizable);
                 table_resize_handles(
                     ui,
                     salt,
@@ -1540,6 +1579,7 @@ impl LltApp {
                 let (computed, _) =
                     column_widths(&specs, content_width, ui.spacing().item_spacing.x);
                 let mut widths = table_widths(ui, salt, &specs, computed);
+                apply_resize_drag(ui, salt, &specs, &mut widths, Col::resizable);
                 let active = table_active_column(ui, salt);
                 let table = exact_columns(
                     TableBuilder::new(ui)
@@ -1554,12 +1594,14 @@ impl LltApp {
                 // 单元格右边界直接取自表头实际画出来的位置：滚动、内边距都由它兜底，
                 // 不用自己拿宽度累加（累加对不上只会在滚动时偏几十点）。
                 let mut edges: Vec<f32> = Vec::with_capacity(specs.len());
+                let mut cells: Vec<egui::Rect> = Vec::with_capacity(specs.len());
                 let mut first_row: Option<egui::Rect> = None;
                 table
                     .header(theme::list_header_height(), |mut header| {
                         for (index, spec) in specs.iter().enumerate() {
                             header.col(|ui| {
                                 edges.push(ui.max_rect().right());
+                                cells.push(ui.max_rect());
                                 column_head(ui, spec, active == Some(index));
                             });
                         }
@@ -1600,6 +1642,7 @@ impl LltApp {
                             }
                         });
                     });
+                table_header_drag(ui, salt, &specs, &cells, Col::key, Col::resizable);
                 table_resize_handles(
                     ui,
                     salt,
@@ -1964,6 +2007,7 @@ impl LltApp {
                 let (computed, _) =
                     column_widths(&specs, content_width, ui.spacing().item_spacing.x);
                 let mut widths = table_widths(ui, salt, &specs, computed);
+                apply_resize_drag(ui, salt, &specs, &mut widths, Col::resizable);
                 let active = table_active_column(ui, salt);
                 let table = exact_columns(
                     TableBuilder::new(ui)
@@ -1978,12 +2022,14 @@ impl LltApp {
                 // 单元格右边界直接取自表头实际画出来的位置：滚动、内边距都由它兜底，
                 // 不用自己拿宽度累加（累加对不上只会在滚动时偏几十点）。
                 let mut edges: Vec<f32> = Vec::with_capacity(specs.len());
+                let mut cells: Vec<egui::Rect> = Vec::with_capacity(specs.len());
                 let mut first_row: Option<egui::Rect> = None;
                 table
                     .header(theme::list_header_height(), |mut header| {
                         for (index, spec) in specs.iter().enumerate() {
                             header.col(|ui| {
                                 edges.push(ui.max_rect().right());
+                                cells.push(ui.max_rect());
                                 column_head(ui, spec, active == Some(index));
                             });
                         }
@@ -2007,6 +2053,7 @@ impl LltApp {
                             }
                         });
                     });
+                table_header_drag(ui, salt, &specs, &cells, Col::key, Col::resizable);
                 table_resize_handles(
                     ui,
                     salt,
@@ -2362,6 +2409,44 @@ impl LltApp {
         }
     }
 
+    /// 表头拖动换序的结果落回列设置（下一帧生效，并存进配置）。
+    ///
+    /// 表格只认「当前这一帧的列序」，换序的愿望写在界面状态里；在这里统一读出来，
+    /// 免得四个表的绘制函数都要往回传一个「换过的列序」。
+    fn apply_column_order(&mut self, ctx: &egui::Context) {
+        fn take(ctx: &egui::Context, salt: &str) -> Option<Vec<String>> {
+            ctx.data_mut(|data| data.remove_temp(egui::Id::unique((salt, "column_order"))))
+        }
+        if let Some(keys) = take(ctx, WidthTable::Od.salt()) {
+            let picked = columns::parse(&keys, columns::OdColumn::from_key);
+            if !picked.is_empty() && self.od_columns.as_ref() != Some(&picked) {
+                self.od_columns = Some(picked);
+                reset_table_widths(ctx, WidthTable::Od);
+            }
+        }
+        if let Some(keys) = take(ctx, WidthTable::Train.salt()) {
+            let picked = columns::parse(&keys, columns::TrainColumn::from_key);
+            if !picked.is_empty() && self.train_columns.as_ref() != Some(&picked) {
+                self.train_columns = Some(picked);
+                reset_table_widths(ctx, WidthTable::Train);
+            }
+        }
+        if let Some(keys) = take(ctx, WidthTable::Station.salt()) {
+            let picked = columns::parse(&keys, columns::StationColumn::from_key);
+            if !picked.is_empty() && self.station_columns.as_ref() != Some(&picked) {
+                self.station_columns = Some(picked);
+                reset_table_widths(ctx, WidthTable::Station);
+            }
+        }
+        if let Some(keys) = take(ctx, WidthTable::Stops.salt()) {
+            let picked = columns::parse(&keys, columns::StopColumn::from_key);
+            if !picked.is_empty() && self.stop_columns.as_ref() != Some(&picked) {
+                self.stop_columns = Some(picked);
+                reset_table_widths(ctx, WidthTable::Stops);
+            }
+        }
+    }
+
     /// 执行详情里的跳转。
     ///
     /// - 车站：切到「按车站查询」并只查这一站。宽屏保留右侧详情，方便对照原车次；
@@ -2458,6 +2543,8 @@ impl LltApp {
 
 impl eframe::App for LltApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        // 表头拖动换序：表格那边只把新顺序写进界面状态，这里落回列设置。
+        self.apply_column_order(ui.ctx());
         // 横竖屏切换 / 分屏改尺寸时，系统不一定会再推一帧；尺寸一变就自己请求一次，
         // 否则会看到旧宽度排出来的画面，得等下一次触摸才刷新。
         let screen = ui.ctx().content_rect().size();
@@ -3015,6 +3102,7 @@ impl LltApp {
                 ColumnTable::Od => column_list(
                     ui,
                     "columns_od",
+                    WidthTable::Od,
                     &mut self.od_columns,
                     od_auto,
                     columns::OdColumn::ALL,
@@ -3024,6 +3112,7 @@ impl LltApp {
                 ColumnTable::Train => column_list(
                     ui,
                     "columns_train",
+                    WidthTable::Train,
                     &mut self.train_columns,
                     train_auto,
                     columns::TrainColumn::ALL,
@@ -3033,6 +3122,7 @@ impl LltApp {
                 ColumnTable::Station => column_list(
                     ui,
                     "columns_station",
+                    WidthTable::Station,
                     &mut self.station_columns,
                     station_auto,
                     columns::StationColumn::ALL,
@@ -3042,6 +3132,7 @@ impl LltApp {
                 ColumnTable::Stops => column_list(
                     ui,
                     "columns_stops",
+                    WidthTable::Stops,
                     &mut self.stop_columns,
                     stop_auto,
                     columns::StopColumn::ALL,
@@ -3112,6 +3203,7 @@ impl LltApp {
                         ColumnTable::Od => column_list(
                             ui,
                             "columns_od",
+                            WidthTable::Od,
                             &mut self.od_columns,
                             columns::OdColumn::auto(auto_width),
                             columns::OdColumn::ALL,
@@ -3121,6 +3213,7 @@ impl LltApp {
                         ColumnTable::Train => column_list(
                             ui,
                             "columns_train",
+                            WidthTable::Train,
                             &mut self.train_columns,
                             columns::TrainColumn::auto(auto_width),
                             columns::TrainColumn::ALL,
@@ -3130,6 +3223,7 @@ impl LltApp {
                         ColumnTable::Station => column_list(
                             ui,
                             "columns_station",
+                            WidthTable::Station,
                             &mut self.station_columns,
                             columns::StationColumn::auto(
                                 auto_width,
@@ -3142,6 +3236,7 @@ impl LltApp {
                         ColumnTable::Stops => column_list(
                             ui,
                             "columns_stops",
+                            WidthTable::Stops,
                             &mut self.stop_columns,
                             columns::StopColumn::auto(auto_width),
                             columns::StopColumn::ALL,
@@ -3699,6 +3794,7 @@ fn stops_table_ui(
         |ui| {
             let header_top = ui.cursor().top();
             let mut widths = table_widths(ui, "train_stops", &specs, widths);
+            apply_resize_drag(ui, "train_stops", &specs, &mut widths, Col::resizable);
             let active = table_active_column(ui, "train_stops");
             let table = exact_columns(
                 TableBuilder::new(ui)
@@ -3710,12 +3806,14 @@ fn stops_table_ui(
                 &widths,
             );
             let mut edges: Vec<f32> = Vec::with_capacity(specs.len());
+            let mut cells: Vec<egui::Rect> = Vec::with_capacity(specs.len());
             let mut first_row: Option<egui::Rect> = None;
             table
                 .header(theme::detail_header_height(), |mut header| {
                     for (index, spec) in specs.iter().enumerate() {
                         header.col(|ui| {
                             edges.push(ui.max_rect().right());
+                            cells.push(ui.max_rect());
                             column_head(ui, spec, active == Some(index));
                         });
                     }
@@ -3770,6 +3868,7 @@ fn stops_table_ui(
                         }
                     });
                 });
+            table_header_drag(ui, "train_stops", &specs, &cells, Col::key, Col::resizable);
             table_resize_handles(
                 ui,
                 "train_stops",
@@ -5095,12 +5194,14 @@ fn cell_layout() -> Layout {
 fn column_list<C: Copy + PartialEq + Send + Sync + 'static>(
     ui: &mut Ui,
     salt: &'static str,
+    widths_of: WidthTable,
     picked: &mut Option<Vec<C>>,
     auto: Vec<C>,
     all: &[C],
     spec: fn(C) -> columns::Spec<C>,
     compact: bool,
 ) {
+    let before = picked.clone();
     if compact {
         // 弹窗里行距再紧一档：13 行一屏能放下，少滚一次。
         ui.spacing_mut().item_spacing.y = 2.0;
@@ -5241,6 +5342,10 @@ fn column_list<C: Copy + PartialEq + Send + Sync + 'static>(
 
     ui.data_mut(|data| data.insert_temp(order_id, order));
     ui.data_mut(|data| data.insert_temp(drag_id, drag_from));
+    // 列集合或顺序变了：拖动记下的宽度按老列序量的，作废重算。
+    if *picked != before {
+        reset_table_widths(ui.ctx(), widths_of);
+    }
 }
 
 /// 列清单的一行：左边拖动把手 + 复选框 + 名称。
@@ -5507,10 +5612,81 @@ fn exact_columns<'a>(mut table: TableBuilder<'a>, widths: &[f32]) -> TableBuilde
     table
 }
 
+/// 有「列宽记忆」的四张表：配置里按 od / train / station / stops 分开存，
+/// 界面状态里按绘制用的 `salt` 分开存，两边靠这张表对应。
+#[derive(Debug, Clone, Copy)]
+enum WidthTable {
+    Od,
+    Train,
+    Station,
+    Stops,
+}
+
+impl WidthTable {
+    const ALL: [Self; 4] = [Self::Od, Self::Train, Self::Station, Self::Stops];
+
+    /// 绘制这些表时用的 `salt`（与 `table_widths` 的入参一致）。
+    fn salt(self) -> &'static str {
+        match self {
+            Self::Od => "od_results",
+            Self::Train => "train_results",
+            Self::Station => "station_board",
+            Self::Stops => "train_stops",
+        }
+    }
+
+    fn get(self, widths: &config::ColumnWidths) -> Option<&config::ColumnWidth> {
+        match self {
+            Self::Od => widths.od.as_ref(),
+            Self::Train => widths.train.as_ref(),
+            Self::Station => widths.station.as_ref(),
+            Self::Stops => widths.stops.as_ref(),
+        }
+    }
+
+    fn set(self, widths: &mut config::ColumnWidths, value: Option<config::ColumnWidth>) {
+        match self {
+            Self::Od => widths.od = value,
+            Self::Train => widths.train = value,
+            Self::Station => widths.station = value,
+            Self::Stops => widths.stops = value,
+        }
+    }
+}
+
+/// 列集合或列序变了：之前那些宽度是按老列序量的，作废重算。
+fn reset_table_widths(ctx: &egui::Context, table: WidthTable) {
+    let salt = table.salt();
+    ctx.data_mut(|data| {
+        data.remove::<Vec<f32>>(egui::Id::unique((salt, "widths")));
+        data.remove::<i32>(egui::Id::unique((salt, "widths_seeded")));
+    });
+}
+
+/// 把配置里记住的列宽塞回界面状态，并记下「是按哪套布局量的」。
+fn seed_column_widths(ctx: &egui::Context, widths: &config::ColumnWidths) {
+    for table in WidthTable::ALL {
+        let Some(saved) = table.get(widths) else {
+            continue;
+        };
+        if saved.widths.is_empty() {
+            continue;
+        }
+        let values: Vec<f32> = saved.widths.iter().map(|width| f32::from(*width)).collect();
+        let viewport = saved.viewport;
+        let salt = table.salt();
+        ctx.data_mut(|data| {
+            data.insert_temp(egui::Id::unique((salt, "widths")), values);
+            data.insert_temp(egui::Id::unique((salt, "widths_seeded")), viewport);
+        });
+    }
+}
+
 /// 每张表的列宽。
 ///
 /// 首次、可视宽度变化、列集合变化时按内容重算；其余时候保留用户拖出来的宽度
-/// （存在 egui 临时内存里，按 `salt` 区分）。`computed` 是这一帧算出的自适应宽度。
+/// （存在 egui 界面状态里，按 `salt` 区分；也会写进配置，下次启动照旧）。
+/// `computed` 是这一帧算出的自适应宽度。
 fn table_widths<C>(
     ui: &Ui,
     salt: &str,
@@ -5518,10 +5694,22 @@ fn table_widths<C>(
     computed: Vec<f32>,
 ) -> Vec<f32> {
     let id = egui::Id::unique((salt, "widths"));
+    let seeded_id = egui::Id::unique((salt, "widths_seeded"));
+    // 启动时从配置恢复的那一份：只有「按同一套布局量的」才认，认完就清掉标记，
+    // 之后窗口尺寸再变照旧重新自适应。
+    let viewport = column_viewport(ui);
+    let seeded = ui.data(|data| {
+        data.get_temp::<i32>(seeded_id)
+            .is_some_and(|saved| (saved - viewport).abs() <= VIEWPORT_SLACK)
+            && data
+                .get_temp::<Vec<f32>>(id)
+                .is_some_and(|widths| widths.len() == specs.len())
+    });
+    ui.data_mut(|data| data.remove::<i32>(seeded_id));
     let changed = column_layout_changed(ui, salt);
     let stored: Option<Vec<f32>> = ui.data(|data| data.get_temp(id));
     match stored {
-        Some(widths) if !changed && widths.len() == specs.len() => widths,
+        Some(widths) if (!changed || seeded) && widths.len() == specs.len() => widths,
         _ => {
             ui.data_mut(|data| data.insert_temp(id, computed.clone()));
             computed
@@ -5529,10 +5717,164 @@ fn table_widths<C>(
     }
 }
 
+/// 指针按下到现在多久（秒）。调宽与表头换序共用一份计时。
+///
+/// egui 没有公开 `press_start_time()`，自己按 `salt` 记一笔。
+fn pointer_held(ui: &Ui, salt: &str) -> f64 {
+    let press_id = egui::Id::unique((salt, "resize_press_at"));
+    let now = ui.input(|input| input.time);
+    if ui.input(|input| input.pointer.any_pressed()) {
+        ui.data_mut(|data| data.insert_temp(press_id, now));
+    } else if !ui.input(|input| input.pointer.any_down()) {
+        ui.data_mut(|data| data.remove::<f64>(press_id));
+    }
+    ui.data(|data| data.get_temp::<f64>(press_id))
+        .map_or(0.0, |start| now - start)
+}
+
+/// 表头文字水平拖动换列序：指针越过相邻列的中线就把这两列换位。
+///
+/// 换序结果只写进界面状态（`("column_order", salt)`），由 `LltApp` 下一帧落回列设置——
+/// 表格这边只认「这一帧的列序」，不直接改配置。触摸屏和调宽一样要先按住
+/// [`RESIZE_LONG_PRESS`] 秒，否则从表头起手的横拖本来是滚动。
+fn table_header_drag<C: Copy>(
+    ui: &mut Ui,
+    salt: &str,
+    specs: &[columns::Spec<C>],
+    cells: &[egui::Rect],
+    key: fn(C) -> &'static str,
+    movable: fn(C) -> bool,
+) {
+    let touch = theme::pointer() == theme::Pointer::Touch;
+    let armed = !touch || pointer_held(ui, salt) >= RESIZE_LONG_PRESS;
+    let drag_id = egui::Id::unique((salt, "head_drag"));
+    // 存的是 `Option<usize>`，取出来也是 `Option<Option<usize>>`，要再摊平一次。
+    let mut dragged: Option<usize> = ui.data(|data| data.get_temp(drag_id)).flatten();
+    if !ui.input(|input| input.pointer.any_down()) {
+        dragged = None;
+    }
+    for (index, spec) in specs.iter().enumerate() {
+        if !movable(spec.column) {
+            continue;
+        }
+        let Some(cell) = cells.get(index).copied() else {
+            continue;
+        };
+        // id 用列名而不是下标：换完序这列会挪到别的格子，拖动不能断。
+        let response = ui.interact(
+            cell,
+            ui.make_persistent_id((salt, "head", key(spec.column))),
+            Sense::click_and_drag(),
+        );
+        if response.dragged() && armed {
+            ui.set_cursor_icon(egui::CursorIcon::Grabbing);
+            dragged = Some(index);
+        } else if response.hovered() && armed {
+            ui.set_cursor_icon(egui::CursorIcon::Grab);
+        }
+    }
+    let pointer = ui.input(|input| input.pointer.interact_pos());
+    if let (Some(index), Some(pointer)) = (dragged, pointer) {
+        // 只跟紧挨着的那一列换：越过它的中线才动手，原地小幅抖动不会误触发。
+        let movable_at = |target: usize| specs.get(target).is_some_and(|spec| movable(spec.column));
+        let mut target = None;
+        if let Some(next) = cells.get(index + 1) {
+            if pointer.x > next.center().x && movable_at(index + 1) {
+                target = Some(index + 1);
+            }
+        }
+        if target.is_none() {
+            if let Some(previous) = index.checked_sub(1) {
+                if pointer.x < cells[previous].center().x && movable_at(previous) {
+                    target = Some(previous);
+                }
+            }
+        }
+        if let Some(target) = target {
+            let mut order: Vec<String> = specs
+                .iter()
+                .map(|spec| key(spec.column).to_owned())
+                .collect();
+            order.swap(index, target);
+            ui.data_mut(|data| {
+                data.insert_temp(egui::Id::unique((salt, "column_order")), order);
+            });
+            dragged = Some(target);
+        }
+    }
+    ui.data_mut(|data| data.insert_temp(drag_id, dragged));
+}
+
 /// 正在拖动的那一列（表头加粗、分隔线加粗用）。读的是上一帧记下的结果。
 fn table_active_column(ui: &Ui, salt: &str) -> Option<usize> {
-    ui.data(|data| data.get_temp::<Option<usize>>(egui::Id::unique((salt, "resize_active"))))
-        .flatten()
+    let read = |key: &str| {
+        ui.data(|data| data.get_temp::<Option<usize>>(egui::Id::unique((salt, key))))
+            .flatten()
+    };
+    // 调宽、换序都算「正在动这一列」：表头加粗变强调色，分隔线也加粗——
+    // 手指按住不放时得看得出在改哪一列。都是上一帧记下的结果（绘制在写入之前）。
+    read("resize_active").or_else(|| read("head_drag"))
+}
+
+/// 拖列宽时，在**画表之前**把这一帧的指针位移落进列宽。
+///
+/// 拖动的判定本来在表画完之后（要表的实际几何），可那样列宽永远晚一帧生效：
+/// 手指快速滑动时，分隔线（下一帧才挪过去）会明显跟不上手指。这里先按锚点算一遍，
+/// 表就按新宽度画；`table_resize_handles` 里再算一次只是补上「松手那一帧」
+/// （那时表已经按旧宽度画完了），同一个绝对公式，重复应用无副作用。
+fn apply_resize_drag<C: Copy>(
+    ui: &Ui,
+    salt: &str,
+    specs: &[columns::Spec<C>],
+    widths: &mut [f32],
+    resizable: fn(C) -> bool,
+) {
+    let anchor: Option<ResizeAnchor> = ui
+        .data(|data| data.get_temp(egui::Id::unique((salt, "resize_anchor"))))
+        .flatten();
+    let Some(anchor) = anchor else {
+        return;
+    };
+    let Some(spec) = specs
+        .get(anchor.index)
+        .filter(|spec| resizable(spec.column))
+    else {
+        return;
+    };
+    let touch = theme::pointer() == theme::Pointer::Touch;
+    if touch && pointer_held(ui, salt) < RESIZE_LONG_PRESS {
+        return;
+    }
+    let (pointer, down, released) = ui.input(|input| {
+        (
+            input.pointer.interact_pos(),
+            input.pointer.any_down(),
+            input.pointer.any_released(),
+        )
+    });
+    let Some(pointer) = pointer else {
+        return;
+    };
+    if !down && !released {
+        return;
+    }
+    if let Some(width) = widths.get_mut(anchor.index) {
+        let wanted = (anchor.width + (pointer.x - anchor.pointer_x)).max(spec.min);
+        if (*width - wanted).abs() > 0.01 {
+            *width = wanted;
+            ui.data_mut(|data| {
+                data.insert_temp(egui::Id::unique((salt, "widths")), widths.to_vec());
+            });
+        }
+    }
+}
+
+/// 拖列宽时的锚点：按下那一刻在哪一列、当时多宽、指针在哪。
+#[derive(Debug, Clone, Copy)]
+struct ResizeAnchor {
+    index: usize,
+    width: f32,
+    pointer_x: f32,
 }
 
 /// 列分隔线的拖动调整。
@@ -5565,22 +5907,17 @@ fn table_resize_handles<C: Copy>(
     let top = first_row.top() - header_height;
     let band_bottom = first_row.top();
 
-    // 自己记按下时刻：egui 没有公开的 `press_start_time()`。
-    let press_id = egui::Id::unique((salt, "resize_press_at"));
-    let now = ui.input(|input| input.time);
-    if ui.input(|input| input.pointer.any_pressed()) {
-        ui.data_mut(|data| data.insert_temp(press_id, now));
-    } else if !ui.input(|input| input.pointer.any_down()) {
-        ui.data_mut(|data| data.remove::<f64>(press_id));
-    }
-    let held = ui
-        .data(|data| data.get_temp::<f64>(press_id))
-        .map_or(0.0, |start| now - start);
-    let armed = !touch || held >= RESIZE_LONG_PRESS;
+    let armed = !touch || pointer_held(ui, salt) >= RESIZE_LONG_PRESS;
 
     let idle = ui.visuals().widgets.noninteractive.bg_stroke;
     let hot = ui.visuals().widgets.active.bg_stroke;
     let widths_id = egui::Id::unique((salt, "widths"));
+    let anchor_id = egui::Id::unique((salt, "resize_anchor"));
+    // 按下那一刻记住「哪一列、多宽、指针在哪」，之后按**绝对位移**算宽度：
+    // 只累加 `pointer.delta()` 有两个毛病——触摸屏上按住的那 0.4 秒里移动的部分
+    // 会被整段丢掉（列宽比手指走过的距离少一截），松手那一帧的位移也来不及算。
+    let pointer = ui.input(|input| input.pointer.interact_pos());
+    let mut anchor: Option<ResizeAnchor> = ui.data(|data| data.get_temp(anchor_id)).flatten();
     let mut active = None;
     for (index, spec) in specs.iter().enumerate() {
         let center = edges.get(index).copied().unwrap_or_default() + spacing * 0.5;
@@ -5599,12 +5936,23 @@ fn table_resize_handles<C: Copy>(
         if response.hovered() {
             ui.set_cursor_icon(egui::CursorIcon::ResizeColumn);
         }
-        let dragging = response.dragged() && armed;
+        if response.is_pointer_button_down_on() && anchor.is_none() {
+            anchor = Some(ResizeAnchor {
+                index,
+                width: widths[index],
+                pointer_x: pointer.map_or(0.0, |pointer| pointer.x),
+            });
+        }
+        // 松手那一帧也算：`dragged()` 已经为假，但最后一段位移还没落进宽度里。
+        let dragging = (response.dragged() || response.drag_stopped())
+            && armed
+            && anchor.is_some_and(|anchor| anchor.index == index);
         if dragging {
             active = Some(index);
-            let delta = ui.input(|input| input.pointer.delta()).x;
-            if delta != 0.0 {
-                widths[index] = (widths[index] + delta).max(spec.min);
+            let anchor = anchor.expect("dragging 蕴含 anchor");
+            if let Some(pointer) = pointer {
+                // 松手那一帧也补一次：那时表已经按旧宽度画完了，这条记录留给下一帧。
+                widths[index] = (anchor.width + (pointer.x - anchor.pointer_x)).max(spec.min);
                 ui.data_mut(|data| data.insert_temp(widths_id, widths.to_vec()));
             }
         }
@@ -5629,6 +5977,10 @@ fn table_resize_handles<C: Copy>(
             stroke,
         );
     }
+    if !ui.input(|input| input.pointer.any_down()) {
+        anchor = None;
+    }
+    ui.data_mut(|data| data.insert_temp(anchor_id, anchor));
     ui.data_mut(|data| {
         data.insert_temp(egui::Id::unique((salt, "resize_active")), active);
     });
@@ -5639,18 +5991,26 @@ fn column_viewport(ui: &Ui) -> i32 {
     (ui.clip_rect().width() * 2.0).round() as i32
 }
 
+/// 可视宽度变了多少才算「换了布局」（逻辑点 ×2）。
+///
+/// 浮动滚动条出现/消失只会让可视宽度差 6 点左右，窗口或面板真的变了才会超出这个量；
+/// 差得少的时候不该把用户拖好的列宽丢掉。
+const VIEWPORT_SLACK: i32 = 32;
+
 /// 列宽由 `TableBuilder` 按 `id_salt` 记着，窗口变宽变窄时不会自己重新分配；
-/// 这里按「可视宽度」记一笔，变了就返回 `true`，让调用方 `reset()` 重新自适应。
+/// 这里按「可视宽度」记一笔，变化超过 [`VIEWPORT_SLACK`] 就返回 `true`，
+/// 让调用方 `reset()` 重新自适应。
 ///
 /// 判据不用内容宽度：拖动列宽或出现滚动条都会改变内容宽度，那会把用户刚拖好的
 /// 列宽又重置掉。
 fn column_layout_changed(ui: &Ui, salt: &str) -> bool {
     let viewport = column_viewport(ui);
     let id = egui::Id::unique(("table_viewport", salt));
-    let changed = ui.data(|data| data.get_temp::<i32>(id)) != Some(viewport);
-    if changed {
-        ui.data_mut(|data| data.insert_temp(id, viewport));
-    }
+    let changed = ui
+        .data(|data| data.get_temp::<i32>(id))
+        .is_none_or(|previous| (previous - viewport).abs() > VIEWPORT_SLACK);
+    // 记最新的值（差得少也算更新），下次比较才不会一直拿旧值。
+    ui.data_mut(|data| data.insert_temp(id, viewport));
     changed
 }
 
@@ -5660,7 +6020,8 @@ fn column_layout_changed(ui: &Ui, salt: &str) -> bool {
 /// 不然会把上一轮拖宽的表宽又带进新窗口。
 fn column_layout_stale(ui: &Ui, salt: &str) -> bool {
     let id = egui::Id::unique(("table_viewport", salt));
-    ui.data(|data| data.get_temp::<i32>(id)) != Some(column_viewport(ui))
+    ui.data(|data| data.get_temp::<i32>(id))
+        .is_none_or(|previous| (previous - column_viewport(ui)).abs() > VIEWPORT_SLACK)
 }
 
 /// 记下停站表实际铺开的宽度。

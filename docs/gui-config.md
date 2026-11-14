@@ -98,9 +98,24 @@
   "train":   { "query": "G1" },
   "station": { "query": "北京", "fuzzy": false },
   "od":      { "from": "北京", "to": "上海", "fuzzy": true },
-  "detail":  { "via_stations_only": true }
+  "detail":  { "via_stations_only": true },
+  "columns": {
+    "od":      ["status", "code", "from", "depart", "arrive"],
+    "train":   null,
+    "station": null,
+    "stops":   null,
+    "widths": {
+      "train": { "viewport": 721, "widths": [34, 167, 94] }
+    }
+  }
 }
 ```
+
+`columns.<表>` 是「显示哪些列」（`null` = 按窗口宽度自动挑），顺序就是显示顺序；
+`columns.widths.<表>` 是拖动表头分隔线后的列宽（逻辑点，取整），按表分开存：
+`viewport` 记下量宽度时的可视宽度（`clip_rect` 宽度 × 2），窗口尺寸变了就不再套用——
+旧列宽在新宽度下要么填不满、要么撑出横向滚动条，不如重新自适应。
+列集合或列序一变，这份宽度也作废重算（宽度是按下标对应的）。
 
 `ui.tab` 的取值就是三个标签页的 `snake_case` 名字：`od` / `train` / `station`，
 缺省或第一次启动是 `od`（站站，界面第一页）。
