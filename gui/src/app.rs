@@ -3035,7 +3035,8 @@ impl LltApp {
                 .size(theme::FONT_SECTION)
                 .family(fonts::bold_family()),
         );
-        ui.label(meta("点开一张表，勾选要显示的列；按住行上下拖动可调整顺序。").weak());
+        ui.label(meta("点击按钮以配置相应表格的列。").weak());
+        ui.label(meta("在表格中按住表头的列分隔线并拖动可调整列宽；水平拖动表头可交换列的顺序。").weak());
         ui.add_space(theme::GAP_XS);
 
         let width = ui.available_width();
@@ -5237,7 +5238,7 @@ fn column_list<C: Copy + PartialEq + Send + Sync + 'static>(
     // 「自动」行：勾着表示按窗口宽度挑列；点它清掉自定义。已经是自动时点它不做事，
     // 想改成自定义直接勾选/拖动任意一列即可。
     let auto_on = picked.is_none();
-    if column_row(ui, "自动 · 按窗口宽度挑列", auto_on, false, false, compact)
+    if column_row(ui, "自动", auto_on, false, false, compact)
         .response
         .clicked()
         && !auto_on

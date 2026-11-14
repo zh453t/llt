@@ -278,8 +278,8 @@ impl DataPage {
                     .map(|value| format!("v{value}"))
                     .unwrap_or_else(|| "v?".to_owned());
                 let built_at = state.built_at.clone().unwrap_or_else(|| "未知".to_owned());
-                info_row(ui, "数据", version, row);
-                info_row(ui, "结构", schema, row);
+                info_row(ui, "版本", version, row);
+                info_row(ui, "结构版本", schema, row);
                 info_row(ui, "构建于", built_at, row);
                 info_row(ui, "大小", size_text(file_size(db_path)), row);
                 info_row(ui, "位置", db_path.display().to_string(), row);
@@ -389,10 +389,10 @@ impl DataPage {
         let busy = self.busy();
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP_S;
-            if button(ui, "导出备份").clicked() && !busy {
+            if button(ui, "导出").clicked() && !busy {
                 self.export_backup(ui.ctx(), db_path);
             }
-            if button(ui, "导入备份").clicked() && !busy {
+            if button(ui, "导入").clicked() && !busy {
                 self.pick_backup(ui.ctx());
             }
         });
@@ -460,13 +460,13 @@ impl DataPage {
     fn notes_ui(&mut self, ui: &mut Ui) {
         heading(ui, "说明");
         match self.picker {
-            Some(_) => ui.label(meta("导出走系统「保存到」，导入前会自动备份当前库。")),
+            Some(_) => ui.label(meta("导出的是解密的 sql 数据库，导入前会自动备份当前库。")),
             None => ui.label(meta(format!(
                 "备份写在 {}，拷回这里即可导入。",
                 self.dirs.export.display()
             ))),
         };
-        ui.label(meta("更新需要约 90 MB 临时空间。"));
+        ui.label(meta("更新需要约 90 MB 临时空间。").weak());
     }
 
     // ------------------------------------------------------------ 动作
