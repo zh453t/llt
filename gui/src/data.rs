@@ -55,6 +55,8 @@ impl DataDirs {
 pub struct DataOutcome {
     /// 库被替换过（下载重建 / 导入备份）。
     pub reload_db: bool,
+    /// 后台正在替换库文件：先把 SQLite 连接放开，否则 Windows 上改名会「拒绝访问」。
+    pub close_db: bool,
 }
 
 /// 后台任务类型，只用来把文案说清楚。
@@ -246,7 +248,7 @@ impl DataPage {
 
         self.current_ui(ui, db_path);
         ui.add_space(theme::GAP_M);
-        self.task_ui(ui, db_path);
+        self.task_ui(ui, db_path, outcome);
         ui.add_space(theme::GAP_M);
         self.backup_ui(ui, db_path, outcome);
         if !self.backups.is_empty() {
@@ -318,9 +320,16 @@ impl DataPage {
         }
     }
 
-    fn task_ui(&mut self, ui: &mut Ui, db_path: &Path) {
+    fn task_ui(&mut self, ui: &mut Ui, db_path: &Path, outcome: &mut DataOutcome) {
         heading(ui, "更新");
         let busy = self.busy();
+        // 下载重建会替换库文件：任务在跑就一直别让本进程占着 SQLite。
+        if matches!(
+            self.task.as_ref().map(|task| task.kind),
+            Some(TaskKind::Build | TaskKind::Import)
+        ) {
+            outcome.close_db = true;
+        }
 
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP_S;
@@ -334,6 +343,7 @@ impl DataPage {
             };
             if button(ui, download_label).clicked() && !busy {
                 self.start_build(ui.ctx(), db_path, true);
+                outcome.close_db = true;
             }
             ui.checkbox(&mut self.force, "强制重建");
         });
@@ -403,6 +413,7 @@ impl DataPage {
                 ui.spacing_mut().item_spacing.x = theme::GAP_S;
                 if button(ui, "确认导入").clicked() && !busy {
                     self.start_import(ui.ctx(), db_path, path.clone());
+                    outcome.close_db = true;
                     self.pending_import = None;
                 }
                 if button(ui, "取消").clicked() {
@@ -621,7 +632,7 @@ impl DataPage {
     ///
     /// 平台侧只负责把字节搬到位：导入时已经把文件复制到导入目录，这里拿到的是一条
     /// 本地路径，走的是与「目录里挑一份」完全相同的校验与替换流程。
-    fn pump_picker(&mut self, ctx: &egui::Context, db_path: &Path, _outcome: &mut DataOutcome) {
+    fn pump_picker(&mut self, ctx: &egui::Context, db_path: &Path, outcome: &mut DataOutcome) {
         let Some(picker) = self.picker.clone() else {
             return;
         };
@@ -634,6 +645,7 @@ impl DataPage {
                 FileEvent::Imported(path) => {
                     // 不直接相信选择器给的文件：仍按备份校验，顺便沿用自动备份。
                     self.start_import(ctx, db_path, path);
+                    outcome.close_db = true;
                 }
                 FileEvent::Exported(target) => {
                     self.notice = Some(Notice {
@@ -683,16 +695,19 @@ impl DataPage {
                         });
                         match done {
                             TaskDone::Remote(remote) => self.remote = Some(Ok(remote)),
-                            TaskDone::Rebuilt(text) => {
-                                // 「已是最新」不会改库，但重开一次也无害且状态更简单。
-                                if kind == TaskKind::Import || !text.starts_with("已是最新") {
-                                    outcome.reload_db = true;
-                                }
-                            }
+                            TaskDone::Rebuilt(_) => {}
                             TaskDone::Exported(_) => {}
+                        }
+                        // 下载/重建/导入都可能替换库文件；结束（含失败）后统一重开，
+                        // 之前为了释放文件句柄已经把连接关了。
+                        if matches!(kind, TaskKind::Build | TaskKind::Import) {
+                            outcome.reload_db = true;
                         }
                     }
                     Err(err) => {
+                        if matches!(kind, TaskKind::Build | TaskKind::Import) {
+                            outcome.reload_db = true;
+                        }
                         self.notice = Some(Notice {
                             ok: false,
                             text: err,
@@ -805,7 +820,8 @@ fn import_backup(source: &Path, target: &Path, backup_dir: &Path) -> anyhow::Res
 
     let tmp = target.with_extension("sqlite.tmp");
     std::fs::copy(source, &tmp).with_context(|| format!("无法写入 {}", tmp.display()))?;
-    std::fs::rename(&tmp, target).with_context(|| format!("无法写入 {}", target.display()))?;
+    lltdata::export::replace_file(&tmp, target)
+        .with_context(|| format!("无法写入 {}", target.display()))?;
     Ok(format!(
         "已导入 {}（数据 {}）",
         file_name(source),

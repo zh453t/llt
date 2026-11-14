@@ -18,6 +18,11 @@ use lltdb::{Db, OdResult, StationStop, Stop, TrainDetail, TrainSummary};
 const OD_RESULT_LIMIT: usize = 500;
 /// 输入/点击停止多久之后才落盘：逐键写盘既浪费，也会把半截输入写进配置。
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+/// 触摸屏上按住列分隔线多久才开始调整列宽（秒）。
+///
+/// 手指从行上开始拖动通常是滚动，不能因为擦到列边就把列宽改了；按住这一小会儿
+/// 才进入「调整列宽」模式。鼠标没有这个限制。
+const RESIZE_LONG_PRESS: f64 = 0.4;
 const STATION_SUGGESTIONS: usize = 24;
 /// 宽屏布局（右侧详情栏、自动聚焦输入框）的最小窗口宽度。
 use theme::WIDE_MIN_WIDTH;
@@ -118,6 +123,15 @@ enum OdField {
     To,
 }
 
+/// 设置页「表格列」里展开的是哪一张表：手风琴，一次只开一个。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ColumnTable {
+    Od,
+    Train,
+    Station,
+    Stops,
+}
+
 /// 同城查询/车站筛选里的一个车站。
 #[derive(Clone)]
 struct StationOption {
@@ -160,6 +174,9 @@ impl TrainExtras {
 
 pub struct LltApp {
     db: Option<Db>,
+    /// 后台正在替换库文件：连接已被主动放开（Windows 上不释放句柄就改不了名），
+    /// 但界面不能因此掉进「还没有时刻表数据」页。
+    db_suspended: bool,
     db_path: PathBuf,
     db_error: Option<String>,
     /// 数据库里记录的数据包版本（`20261108`），供标题栏显示数据日期。
@@ -189,6 +206,8 @@ pub struct LltApp {
     train_columns: Option<Vec<columns::TrainColumn>>,
     station_columns: Option<Vec<columns::StationColumn>>,
     stop_columns: Option<Vec<columns::StopColumn>>,
+    /// 设置页「表格列」展开的是哪张表（`None` = 都收起）。
+    columns_open: Option<ColumnTable>,
     station_suggestions: Vec<String>,
     /// 当前同城组的全部车站，供车站筛选。
     station_options: Vec<StationOption>,
@@ -241,10 +260,12 @@ pub struct LltApp {
     /// egui-winit 随之 set_ime_allowed(false)+(true)，Android 上先收后弹，
     /// 而「弹」会被系统忽略（焦点在我们的桥 View 上），所以要自己补一次。
     ime_reshow: u8,
-    /// 最近一次读到的缩进。
+    /// 上一次读到的缩进。
     safe_area: crate::ScreenInsets,
     /// 上一次询问缩进的时间，用作最小间隔。
     inset_probe_at: Option<Instant>,
+    /// 上一次报给平台的「系统栏图标是否要深色」（浅色主题）；`None` = 还没报过。
+    bars_light: Option<bool>,
 
     /// 配置文件路径：默认紧挨可执行文件，见 [`config::resolve`]。
     config_path: PathBuf,
@@ -277,6 +298,7 @@ impl LltApp {
         let data_page = crate::data::DataPage::new(platform.dirs.clone(), platform.files.clone());
         let mut app = Self {
             db: None,
+            db_suspended: false,
             data: data_page,
             db_path,
             db_error: None,
@@ -297,46 +319,27 @@ impl LltApp {
                 .columns
                 .od
                 .as_deref()
-                .map(|keys| {
-                    columns::parse(keys, columns::OdColumn::from_key, columns::OdColumn::ALL)
-                })
+                .map(|keys| columns::parse(keys, columns::OdColumn::from_key))
                 .filter(|picked| !picked.is_empty()),
             train_columns: settings
                 .columns
                 .train
                 .as_deref()
-                .map(|keys| {
-                    columns::parse(
-                        keys,
-                        columns::TrainColumn::from_key,
-                        columns::TrainColumn::ALL,
-                    )
-                })
+                .map(|keys| columns::parse(keys, columns::TrainColumn::from_key))
                 .filter(|picked| !picked.is_empty()),
             station_columns: settings
                 .columns
                 .station
                 .as_deref()
-                .map(|keys| {
-                    columns::parse(
-                        keys,
-                        columns::StationColumn::from_key,
-                        columns::StationColumn::ALL,
-                    )
-                })
+                .map(|keys| columns::parse(keys, columns::StationColumn::from_key))
                 .filter(|picked| !picked.is_empty()),
             stop_columns: settings
                 .columns
                 .stops
                 .as_deref()
-                .map(|keys| {
-                    columns::parse(
-                        keys,
-                        columns::StopColumn::from_key,
-                        columns::StopColumn::ALL,
-                    )
-                })
+                .map(|keys| columns::parse(keys, columns::StopColumn::from_key))
                 .filter(|picked| !picked.is_empty()),
+            columns_open: None,
             station_suggestions: Vec::new(),
             station_options: Vec::new(),
             station_selected: BTreeSet::new(),
@@ -372,6 +375,7 @@ impl LltApp {
             platform,
             safe_area: crate::ScreenInsets::default(),
             inset_probe_at: None,
+            bars_light: None,
             config_path,
             persisted: settings,
             dirty_since: None,
@@ -404,6 +408,7 @@ impl LltApp {
 
     fn open_db(&mut self) {
         self.db = None;
+        self.db_suspended = false;
         self.data_version = None;
         self.db_error = None;
 
@@ -1193,7 +1198,10 @@ impl LltApp {
             height,
             theme::list_header_height(),
             |ui, content_width| {
-                let (widths, _) = column_widths(&specs, content_width, ui.spacing().item_spacing.x);
+                let (computed, _) =
+                    column_widths(&specs, content_width, ui.spacing().item_spacing.x);
+                let mut widths = table_widths(ui, salt, &specs, computed);
+                let active = table_active_column(ui, salt);
                 let table = exact_columns(
                     TableBuilder::new(ui)
                         .id_salt(salt)
@@ -1204,10 +1212,17 @@ impl LltApp {
                         .cell_layout(cell_layout()),
                     &widths,
                 );
+                // 单元格右边界直接取自表头实际画出来的位置：滚动、内边距都由它兜底，
+                // 不用自己拿宽度累加（累加对不上只会在滚动时偏几十点）。
+                let mut edges: Vec<f32> = Vec::with_capacity(specs.len());
+                let mut first_row: Option<egui::Rect> = None;
                 table
                     .header(theme::list_header_height(), |mut header| {
-                        for spec in &specs {
-                            header.col(|ui| column_head(ui, spec));
+                        for (index, spec) in specs.iter().enumerate() {
+                            header.col(|ui| {
+                                edges.push(ui.max_rect().right());
+                                column_head(ui, spec, active == Some(index));
+                            });
                         }
                     })
                     .body(|body| {
@@ -1236,11 +1251,24 @@ impl LltApp {
                                     }
                                 });
                             }
+                            if row.index() == 0 {
+                                first_row = Some(row.response().rect);
+                            }
                             if row.response().clicked() {
                                 clicked = Some(train.index);
                             }
                         });
                     });
+                table_resize_handles(
+                    ui,
+                    salt,
+                    &specs,
+                    &mut widths,
+                    &edges,
+                    first_row,
+                    theme::list_header_height(),
+                    Col::resizable,
+                );
             },
         );
         clicked
@@ -1484,7 +1512,10 @@ impl LltApp {
             height,
             theme::list_header_height(),
             |ui, content_width| {
-                let (widths, _) = column_widths(&specs, content_width, ui.spacing().item_spacing.x);
+                let (computed, _) =
+                    column_widths(&specs, content_width, ui.spacing().item_spacing.x);
+                let mut widths = table_widths(ui, salt, &specs, computed);
+                let active = table_active_column(ui, salt);
                 let table = exact_columns(
                     TableBuilder::new(ui)
                         .id_salt(salt)
@@ -1495,10 +1526,17 @@ impl LltApp {
                         .cell_layout(cell_layout()),
                     &widths,
                 );
+                // 单元格右边界直接取自表头实际画出来的位置：滚动、内边距都由它兜底，
+                // 不用自己拿宽度累加（累加对不上只会在滚动时偏几十点）。
+                let mut edges: Vec<f32> = Vec::with_capacity(specs.len());
+                let mut first_row: Option<egui::Rect> = None;
                 table
                     .header(theme::list_header_height(), |mut header| {
-                        for spec in &specs {
-                            header.col(|ui| column_head(ui, spec));
+                        for (index, spec) in specs.iter().enumerate() {
+                            header.col(|ui| {
+                                edges.push(ui.max_rect().right());
+                                column_head(ui, spec, active == Some(index));
+                            });
                         }
                     })
                     .body(|body| {
@@ -1529,11 +1567,24 @@ impl LltApp {
                                     Col::Route => route_cell(ui, &stop.first, &stop.last),
                                 });
                             }
+                            if row.index() == 0 {
+                                first_row = Some(row.response().rect);
+                            }
                             if row.response().clicked() {
                                 clicked = Some(stop.train_index);
                             }
                         });
                     });
+                table_resize_handles(
+                    ui,
+                    salt,
+                    &specs,
+                    &mut widths,
+                    &edges,
+                    first_row,
+                    theme::list_header_height(),
+                    Col::resizable,
+                );
             },
         );
         clicked
@@ -1858,8 +1909,8 @@ impl LltApp {
     /// 站站结果表。
     ///
     /// 列由「设置 → 表格列」决定（`custom = None` 时按窗口宽度自动挑）。
-    /// 固定列宽 + 外层两向滚动：手机竖屏六列约 428 点放不下，宁可横向滑，
-    /// 也别把站名和时间挤成省略号。
+    /// 初始列宽 + 外层两向滚动：手机竖屏六列约 428 点放不下，宁可横向滑，
+    /// 也别把站名和时间挤成省略号；桌面端还可以拖动列分隔线微调。
     fn od_rows_table(
         ui: &mut Ui,
         rows: &[&OdResult],
@@ -1885,7 +1936,10 @@ impl LltApp {
             height,
             theme::list_header_height(),
             |ui, content_width| {
-                let (widths, _) = column_widths(&specs, content_width, ui.spacing().item_spacing.x);
+                let (computed, _) =
+                    column_widths(&specs, content_width, ui.spacing().item_spacing.x);
+                let mut widths = table_widths(ui, salt, &specs, computed);
+                let active = table_active_column(ui, salt);
                 let table = exact_columns(
                     TableBuilder::new(ui)
                         .id_salt(salt)
@@ -1896,10 +1950,17 @@ impl LltApp {
                         .cell_layout(cell_layout()),
                     &widths,
                 );
+                // 单元格右边界直接取自表头实际画出来的位置：滚动、内边距都由它兜底，
+                // 不用自己拿宽度累加（累加对不上只会在滚动时偏几十点）。
+                let mut edges: Vec<f32> = Vec::with_capacity(specs.len());
+                let mut first_row: Option<egui::Rect> = None;
                 table
                     .header(theme::list_header_height(), |mut header| {
-                        for spec in &specs {
-                            header.col(|ui| column_head(ui, spec));
+                        for (index, spec) in specs.iter().enumerate() {
+                            header.col(|ui| {
+                                edges.push(ui.max_rect().right());
+                                column_head(ui, spec, active == Some(index));
+                            });
                         }
                     })
                     .body(|body| {
@@ -1913,11 +1974,24 @@ impl LltApp {
                             for spec in &specs {
                                 row.col(|ui| od_cell(ui, spec.column, hit, running));
                             }
+                            if row.index() == 0 {
+                                first_row = Some(row.response().rect);
+                            }
                             if row.response().clicked() {
                                 clicked = Some(hit.train_index);
                             }
                         });
                     });
+                table_resize_handles(
+                    ui,
+                    salt,
+                    &specs,
+                    &mut widths,
+                    &edges,
+                    first_row,
+                    theme::list_header_height(),
+                    Col::resizable,
+                );
             },
         );
         clicked
@@ -1986,44 +2060,61 @@ impl LltApp {
                 ui.separator();
             }
             ui.add_space(theme::GAP_S);
-            // 两向滚动：停站表列多（自定义列）时整页跟着横着滑，而不是把右边裁掉。
-            // 只有一个滚动块，手指拖动不会被内层吃掉。
+            // 整页只有一个滚动块，而且是两向的：
+            // - 纵向滚整页。手指按在停站表上往下拖，滚的也是整页——以前给表格单独
+            //   套一层横向滚动区，那一层的拖动会把手指整段吃掉，按在表上怎么拖页面都不动。
+            // - 横向滚停站表溢出的列。整页共用同一个滚动量，横向滚动条浮在视口底边。
+            // 杂项（含日历）反过来抵消掉横向滚动量、按视口宽度铺：表格右侧溢出不会把
+            // 它们撑宽，横滚时也不跟着左右跑（见下面的 `extras_left`）。
+            let page_left = ui.available_rect_before_wrap().left();
             egui::ScrollArea::both()
                 .id_salt("detail_page_scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    // 停站表列多了要横向滚动。整页共用同一个两向滚动块：横向滚动条浮在
-                    // 视口底边，比塞到长表格底下好找；手指拖动也不用穿过嵌套滚动区。
-                    // 页面内容按「表格需要的宽度」铺开，横滚时下面的杂项和日历一起走，
-                    // 不会出现左边被切掉、右边空一片的样子。
+                    // 滚动区内容带一圈 `content_margin`，表格和杂项都从这里起算。
+                    let margin = f32::from(ui.spacing().scroll.content_margin.left);
                     let viewport = ui.available_width();
-                    let needed = stops_table_width(ui, self.stop_columns.as_deref(), viewport);
-                    let content = needed.max(viewport);
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(content, 0.0),
-                        Layout::top_down(Align::Min),
-                        |ui| {
-                            // 停站表按行数撑开（而不是吃满剩余高度），跟着页面一起滚。
-                            if let Some(station) = stops_table_ui(
-                                ui,
-                                &detail.stops,
-                                self.stop_columns.as_deref(),
-                                content,
-                            ) {
-                                link = Some(DetailLink::Station(station));
-                            }
-                            ui.add_space(theme::GAP_M);
-                            extras_ui(
-                                ui,
-                                &detail.summary,
-                                extras,
-                                &detail.stops,
-                                date,
-                                &mut link,
-                                &mut plan,
-                            );
-                        },
+                    let stale = column_layout_stale(ui, "train_stops");
+                    let natural = stops_table_width(ui, self.stop_columns.as_deref(), viewport);
+                    // 用户把列拖宽后表格内容宽度要跟上去；窗口尺寸变了的那一帧
+                    // 回到自然宽度，让列重新自适应。
+                    let needed = if stale {
+                        natural
+                    } else {
+                        remembered_table_width(ui, "train_stops").unwrap_or(natural)
+                    };
+                    let table_width = needed.max(viewport);
+                    // 停站表按行数撑开（而不是吃满剩余高度），竖向跟着页面滚。
+                    if let Some(station) =
+                        stops_table_ui(ui, &detail.stops, self.stop_columns.as_deref(), table_width)
+                    {
+                        link = Some(DetailLink::Station(station));
+                    }
+                    ui.add_space(theme::GAP_M);
+                    // 杂项画在一个「摆回视口左沿」的子 Ui 里：宽度还是视口宽，
+                    // 位置钉在不滚时的内容左沿（`page_left` + 滚动区内边距），
+                    // 高度照旧跟在停站表下面。内容整体被横向滚走多少与这里无关。
+                    let extras_left = page_left + margin;
+                    let top = ui.cursor().top();
+                    let extras_rect = egui::Rect::from_min_max(
+                        egui::pos2(extras_left, top),
+                        egui::pos2(
+                            extras_left + viewport,
+                            ui.max_rect().bottom().max(top + 1.0),
+                        ),
                     );
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(extras_rect), |ui| {
+                        extras_ui(
+                            ui,
+                            &detail.summary,
+                            extras,
+                            &detail.stops,
+                            date,
+                            &mut link,
+                            &mut plan,
+                            true,
+                        );
+                    });
                 });
         } else if compact {
             let height = ui.available_height();
@@ -2055,6 +2146,7 @@ impl LltApp {
                                     date,
                                     &mut link,
                                     &mut plan,
+                                    true,
                                 );
                             });
                     },
@@ -2094,10 +2186,11 @@ impl LltApp {
                 });
             });
         } else {
-            // 宽屏侧栏：经由展开时独占下方的全部高度，停站表暂时让位。
-            // 两者各分一半时都只剩几行，谁也看不清；收起经由停站表就回来。
+            // 宽屏侧栏：抬头 → 杂项 → 一条入口（经由 | 开行计划）→ 表格。
+            // 经由点开就在这条入口下面就地展开，展开时独占下方全部高度、停站表暂时让位
+            // （两者各分一半时都只剩几行，谁也看不清）。
             let has_via = !extras.via.is_empty();
-            let via_open = has_via
+            let mut via_open = has_via
                 && ui.data(|data| {
                     data.get_temp::<bool>(via_state_id(detail.summary.index))
                         .unwrap_or(false)
@@ -2112,6 +2205,7 @@ impl LltApp {
             ui.add_space(theme::GAP_S);
             ui.separator();
             ui.add_space(theme::GAP_S);
+            // 宽屏的开行计划入口在下面的入口条里，和经由同一行。
             extras_ui(
                 ui,
                 &detail.summary,
@@ -2120,12 +2214,46 @@ impl LltApp {
                 date,
                 &mut link,
                 &mut plan,
+                false,
             );
             ui.add_space(theme::GAP_S);
-            ui.separator();
-            ui.add_space(theme::GAP_S);
+            // 入口条：经由占剩下的宽度（它带一串摘要），开行计划按自身文字宽度。
+            let summary = via_entry_summary(&extras.via);
+            let mut entries = Vec::new();
             if has_via {
-                via_section_ui(
+                entries.push(Entry {
+                    id: "via-inline",
+                    title: "经由",
+                    summary: &summary,
+                    hint: "",
+                    arrow: Some(via_open),
+                    width: None,
+                    hover: if via_open {
+                        "收起经由表"
+                    } else {
+                        "在下面展开经由表"
+                    },
+                });
+            }
+            let plan_entry = plan_entry(None);
+            let plan_width = entry_natural_width(ui, &plan_entry);
+            entries.push(Entry {
+                width: Some(plan_width),
+                ..plan_entry
+            });
+            match entry_bar_ui(ui, &entries) {
+                Some("via-inline") => {
+                    via_open = !via_open;
+                    ui.data_mut(|data| {
+                        data.insert_temp(via_state_id(detail.summary.index), via_open);
+                    });
+                }
+                Some("run-plan") => plan_page_open = true,
+                _ => {}
+            }
+            ui.add_space(theme::GAP_S);
+            if has_via && via_open {
+                via_inline_ui(
                     ui,
                     &extras.via,
                     &mut DetailToggles {
@@ -2134,15 +2262,8 @@ impl LltApp {
                     },
                     &detail.stops,
                     detail.summary.index,
-                    via_open,
                 );
-            }
-            if !via_open {
-                if has_via {
-                    ui.add_space(theme::GAP_S);
-                    ui.separator();
-                    ui.add_space(theme::GAP_S);
-                }
+            } else {
                 // 桌面侧栏也统一走两向滚动：列多时横着滑，纵向照旧滚。
                 let height = ui.available_height();
                 let picked = scrollable_table(
@@ -2333,6 +2454,7 @@ impl eframe::App for LltApp {
         self.pump_ime(ui.ctx());
         self.handle_back(ui.ctx());
         self.persist(ui.ctx());
+        self.sync_system_bars(ui.ctx());
         if !self.window_fitted {
             self.window_fitted = true;
             fit_window(ui.ctx());
@@ -2365,6 +2487,24 @@ impl eframe::App for LltApp {
 }
 
 impl LltApp {
+    /// 系统栏图标跟着界面深浅色走。
+    ///
+    /// 窗口是 edge-to-edge 的，状态栏/导航栏的图标画在界面上面：深色主题下系统默认的
+    /// 白色正好，浅色主题下不改就是白字白底，状态栏上的时间、信号、电量全看不见。
+    /// 每帧比一下 egui **实际生效**的主题（`跟随系统` 时由系统决定，切深浅色时会跟着变），
+    /// 变了才过一次桥，不逐帧走 JNI。
+    fn sync_system_bars(&mut self, ctx: &egui::Context) {
+        let Some(bars) = &self.platform.bars else {
+            return;
+        };
+        let light = ctx.theme() == egui::Theme::Light;
+        if self.bars_light == Some(light) {
+            return;
+        }
+        self.bars_light = Some(light);
+        bars.set_light(light);
+    }
+
     /// 系统栏缩进换算成逻辑点（egui 的 `Margin` 单位）。
     ///
     /// 有回调时最多每 [`INSET_PROBE_INTERVAL`] 问一次：`WindowInsets` 会因
@@ -2410,7 +2550,7 @@ impl LltApp {
 
     /// 除系统栏缩进以外的主体布局。
     fn body(&mut self, ui: &mut Ui) {
-        if self.db.is_none() {
+        if self.db.is_none() && !self.db_suspended {
             // 没有库时直接落到数据页：第一次启动（Android 不再内置数据库）与
             // 「库被删了」都该在同一个地方解决——下载 / 导入。
             egui::Panel::top("header")
@@ -2744,7 +2884,10 @@ impl LltApp {
         if !ctx.input(|input| input.key_pressed(egui::Key::BrowserBack)) {
             return;
         }
-        if self.via_page_open {
+        if self.columns_open.is_some() {
+            // 触摸屏的表格列弹窗：返回键先收弹窗，再轮到详情/退出。
+            self.columns_open = None;
+        } else if self.via_page_open {
             self.via_page_open = false;
         } else if self.detail.is_some() {
             self.close_detail();
@@ -2773,61 +2916,231 @@ impl LltApp {
                 // 数据是设置的一个子章节：复用它的内容，但滚动容器由本页统一提供。
                 self.data.contents(ui, &self.db_path, &mut outcome);
             });
-        if outcome.reload_db {
-            self.open_db();
-            self.data.refresh(&self.db_path);
+        self.apply_data_outcome(outcome);
+        // 触摸屏的列清单是整页弹窗：放在滚动区外画，避免被设置页的滚动裁剪。
+        if theme::pointer() == theme::Pointer::Touch {
+            let screen = self.safe_screen(ui.ctx());
+            self.columns_modal(ui.ctx(), screen);
         }
     }
 
-    /// 「表格列」小节：四张表各一组 chip，勾「自动」以外的列即切到自定义。
+    /// 「表格列」小节：四张表各一个按钮，点开在下方展开竖排列清单。
     ///
-    /// 自动模式下 chip 显示的是**当前宽度下会显示的那几列**——点哪一列就是照着眼前
-    /// 这份加减，所见即所得；点「自动」清掉自定义、回到按宽度自适应。
+    /// 清单里勾选控制显示、按住行拖动调整顺序；勾「自动」回到按窗口宽度挑列。
+    /// 改动逐帧读，下一帧就生效；落盘由 `persist` 的快照比较负责。
     fn columns_settings_ui(&mut self, ui: &mut Ui) {
         ui.label(
             RichText::new("表格列")
                 .size(theme::FONT_SECTION)
                 .family(fonts::bold_family()),
         );
-        ui.label(meta("「自动」按窗口宽度挑；点某一列就从当前这份开始加减。").weak());
+        ui.label(meta("点开一张表，勾选要显示的列；按住行上下拖动可调整顺序。").weak());
         ui.add_space(theme::GAP_XS);
+
         let width = ui.available_width();
-        column_picker(
-            ui,
-            "站站",
-            &mut self.od_columns,
-            columns::OdColumn::auto(width),
-            columns::OdColumn::ALL,
-            columns::OdColumn::spec,
-        );
-        ui.add_space(2.0);
-        column_picker(
-            ui,
-            "车次",
-            &mut self.train_columns,
-            columns::TrainColumn::auto(width),
-            columns::TrainColumn::ALL,
-            columns::TrainColumn::spec,
-        );
-        ui.add_space(2.0);
-        column_picker(
-            ui,
-            "车站",
-            &mut self.station_columns,
-            columns::StationColumn::auto(width, self.station_selected.len() > 1),
-            columns::StationColumn::ALL,
-            columns::StationColumn::spec,
-        );
-        ui.add_space(2.0);
-        column_picker(
-            ui,
-            "停站表",
-            &mut self.stop_columns,
-            columns::StopColumn::auto(width),
-            columns::StopColumn::ALL,
-            columns::StopColumn::spec,
-        );
-        // 列是逐帧读的，改完下一帧就生效；落盘由 `persist` 的快照比较负责。
+        // 自动列按当前宽度算：既显示在按钮上的列数里，也是展开后「自动」状态的勾选。
+        let od_auto = columns::OdColumn::auto(width);
+        let train_auto = columns::TrainColumn::auto(width);
+        let station_auto = columns::StationColumn::auto(width, self.station_selected.len() > 1);
+        let stop_auto = columns::StopColumn::auto(width);
+        let entries = [
+            (
+                "站站",
+                ColumnTable::Od,
+                self.od_columns.as_ref().map_or(od_auto.len(), Vec::len),
+            ),
+            (
+                "车次",
+                ColumnTable::Train,
+                self.train_columns
+                    .as_ref()
+                    .map_or(train_auto.len(), Vec::len),
+            ),
+            (
+                "车站",
+                ColumnTable::Station,
+                self.station_columns
+                    .as_ref()
+                    .map_or(station_auto.len(), Vec::len),
+            ),
+            (
+                "停站表",
+                ColumnTable::Stops,
+                self.stop_columns.as_ref().map_or(stop_auto.len(), Vec::len),
+            ),
+        ];
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(theme::GAP_XS, theme::GAP_XS);
+            for (label, table, count) in entries {
+                let open = self.columns_open == Some(table);
+                let button = egui::Button::new(setting_label(format!("{label} {count}")))
+                    .selected(open)
+                    .frame_when_inactive(true);
+                if ui.add(button).clicked() {
+                    self.columns_open = if open { None } else { Some(table) };
+                }
+            }
+        });
+
+        // 触摸屏（Android）改成整页弹窗，见 `columns_modal`：设置页本身在滚动，
+        // 清单展开在按钮下面时，按钮容易滚出屏幕，手指也容易点错。
+        if theme::pointer() == theme::Pointer::Touch {
+            return;
+        }
+
+        let Some(open) = self.columns_open else {
+            return;
+        };
+        ui.add_space(theme::GAP_XS);
+        egui::Frame::new()
+            .fill(ui.visuals().faint_bg_color)
+            .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+            .corner_radius(6.0)
+            .inner_margin(egui::Margin::symmetric(6, 4))
+            .show(ui, |ui| match open {
+                ColumnTable::Od => column_list(
+                    ui,
+                    "columns_od",
+                    &mut self.od_columns,
+                    od_auto,
+                    columns::OdColumn::ALL,
+                    columns::OdColumn::spec,
+                    false,
+                ),
+                ColumnTable::Train => column_list(
+                    ui,
+                    "columns_train",
+                    &mut self.train_columns,
+                    train_auto,
+                    columns::TrainColumn::ALL,
+                    columns::TrainColumn::spec,
+                    false,
+                ),
+                ColumnTable::Station => column_list(
+                    ui,
+                    "columns_station",
+                    &mut self.station_columns,
+                    station_auto,
+                    columns::StationColumn::ALL,
+                    columns::StationColumn::spec,
+                    false,
+                ),
+                ColumnTable::Stops => column_list(
+                    ui,
+                    "columns_stops",
+                    &mut self.stop_columns,
+                    stop_auto,
+                    columns::StopColumn::ALL,
+                    columns::StopColumn::spec,
+                    false,
+                ),
+            });
+    }
+
+    /// 触摸屏（Android）的表格列清单：整页弹窗。
+    ///
+    /// 设置页本身是一个长滚动区，清单展开在按钮下面时按钮很容易被滚出屏幕；
+    /// 弹窗盖住整页，勾选和拖动都只在一个固定区域里，手指不用来回找。
+    fn columns_modal(&mut self, ctx: &egui::Context, screen: egui::Vec2) {
+        let Some(open) = self.columns_open else {
+            return;
+        };
+        let title = match open {
+            ColumnTable::Od => "站站",
+            ColumnTable::Train => "车次",
+            ColumnTable::Station => "车站",
+            ColumnTable::Stops => "停站表",
+        };
+        // 手机上一屏放得下整张清单：弹窗高度按行数算，下面是空的就不要再撑满整屏。
+        let row_count = match open {
+            ColumnTable::Od => columns::OdColumn::ALL.len(),
+            ColumnTable::Train => columns::TrainColumn::ALL.len(),
+            ColumnTable::Station => columns::StationColumn::ALL.len(),
+            ColumnTable::Stops => columns::StopColumn::ALL.len(),
+        } + 1; // 「自动」行
+        let list_height_needed = row_count as f32 * (theme::popup_column_row_height() + 2.0);
+        let page_w = (screen.x - 24.0).max(240.0);
+        let page_h = (theme::control_height() + theme::GAP_XS + list_height_needed + 24.0)
+            .min(screen.y - 24.0)
+            .max(240.0);
+        let page = egui::vec2(page_w, page_h);
+        let size_key = (page.x.round() as i32, page.y.round() as i32);
+        let inner = page - egui::vec2(24.0, 24.0);
+        let auto_width = inner.x;
+        let visual = ctx.style_of(ctx.theme()).visuals.clone();
+        let frame = egui::Frame::new()
+            .fill(visual.panel_fill)
+            .stroke(visual.widgets.noninteractive.bg_stroke)
+            .corner_radius(egui::CornerRadius::same(10))
+            .inner_margin(12);
+        let mut close = false;
+        let _ = egui::Modal::new(egui::Id::unique(("llt-columns-page", size_key)))
+            .frame(frame)
+            .backdrop_color(egui::Color32::from_black_alpha(140))
+            .show(ctx, |ui| {
+                ui.set_min_size(inner);
+                ui.horizontal(|ui| {
+                    ui.label(bold(format!("表格列 · {title}")).size(theme::FONT_SECTION));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add(egui::Button::new(setting_label("完成"))).clicked() {
+                            close = true;
+                        }
+                    });
+                });
+                ui.add_space(theme::GAP_XS);
+                let list_height =
+                    (inner.y - theme::control_height() - theme::GAP_XS - 8.0).max(120.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("columns_modal_scroll")
+                    .max_height(list_height)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| match open {
+                        ColumnTable::Od => column_list(
+                            ui,
+                            "columns_od",
+                            &mut self.od_columns,
+                            columns::OdColumn::auto(auto_width),
+                            columns::OdColumn::ALL,
+                            columns::OdColumn::spec,
+                            true,
+                        ),
+                        ColumnTable::Train => column_list(
+                            ui,
+                            "columns_train",
+                            &mut self.train_columns,
+                            columns::TrainColumn::auto(auto_width),
+                            columns::TrainColumn::ALL,
+                            columns::TrainColumn::spec,
+                            true,
+                        ),
+                        ColumnTable::Station => column_list(
+                            ui,
+                            "columns_station",
+                            &mut self.station_columns,
+                            columns::StationColumn::auto(
+                                auto_width,
+                                self.station_selected.len() > 1,
+                            ),
+                            columns::StationColumn::ALL,
+                            columns::StationColumn::spec,
+                            true,
+                        ),
+                        ColumnTable::Stops => column_list(
+                            ui,
+                            "columns_stops",
+                            &mut self.stop_columns,
+                            columns::StopColumn::auto(auto_width),
+                            columns::StopColumn::ALL,
+                            columns::StopColumn::spec,
+                            true,
+                        ),
+                    });
+            });
+        // 打开它的那一下点击可能被背景层当成「点了外面」，所以只认「完成」按钮
+        // 和系统返回键（见 `handle_back`）。
+        if close {
+            self.columns_open = None;
+        }
     }
 
     /// 「查询」小节：深浅色 + 两个模糊开关。
@@ -2877,8 +3190,17 @@ impl LltApp {
     /// 「数据」页：当前库、检查更新、下载重建、备份导入导出。
     fn data_ui(&mut self, ui: &mut Ui) {
         let outcome = self.data.ui(ui, &self.db_path);
+        self.apply_data_outcome(outcome);
+    }
+
+    /// 数据页的副作用：替换库文件前放开连接，完成后重开并重跑查询。
+    fn apply_data_outcome(&mut self, outcome: crate::data::DataOutcome) {
+        if outcome.close_db && self.db.is_some() {
+            self.db = None;
+            self.db_suspended = true;
+        }
         if outcome.reload_db {
-            // 库被换掉了：重开连接并把恢复的查询重跑一遍（见 `open_db`）。
+            self.db_suspended = false;
             self.open_db();
             self.data.refresh(&self.db_path);
         }
@@ -3303,7 +3625,8 @@ fn stops_table_ui(
 ) -> Option<String> {
     use columns::StopColumn as Col;
     let specs: Vec<columns::Spec<Col>> = stop_specs(custom, content_width);
-    let (widths, _) = column_widths(&specs, content_width, ui.spacing().item_spacing.x);
+    let spacing = ui.spacing().item_spacing.x;
+    let (widths, _) = column_widths(&specs, content_width, spacing);
     let width = content_width;
     let pitch = theme::detail_row_height() + ui.spacing().item_spacing.y;
     let height = theme::detail_header_height() + stops.len() as f32 * pitch + theme::GAP_S;
@@ -3316,6 +3639,8 @@ fn stops_table_ui(
         Layout::top_down(Align::Min),
         |ui| {
             let header_top = ui.cursor().top();
+            let mut widths = table_widths(ui, "train_stops", &specs, widths);
+            let active = table_active_column(ui, "train_stops");
             let table = exact_columns(
                 TableBuilder::new(ui)
                     .id_salt("train_stops")
@@ -3325,13 +3650,24 @@ fn stops_table_ui(
                     .cell_layout(cell_layout()),
                 &widths,
             );
+            let mut edges: Vec<f32> = Vec::with_capacity(specs.len());
+            let mut first_row: Option<egui::Rect> = None;
             table
                 .header(theme::detail_header_height(), |mut header| {
-                    for spec in &specs {
-                        header.col(|ui| column_head(ui, spec));
+                    for (index, spec) in specs.iter().enumerate() {
+                        header.col(|ui| {
+                            edges.push(ui.max_rect().right());
+                            column_head(ui, spec, active == Some(index));
+                        });
                     }
                 })
-                .body(|body| {
+                .body(|mut body| {
+                    // 整页内容宽度要跟着实际列宽走（用户可能把列拖宽），
+                    // 否则窄屏整页的横向滚动区会把表格右边裁掉。
+                    let drawn = body.widths();
+                    let total =
+                        drawn.iter().sum::<f32>() + spacing * drawn.len().saturating_sub(1) as f32;
+                    remember_table_width(body.ui_mut(), "train_stops", total);
                     body.rows(theme::detail_row_height(), stops.len(), |mut row| {
                         let index = row.index();
                         let stop = &stops[index];
@@ -3370,8 +3706,21 @@ fn stops_table_ui(
                                 }
                             });
                         }
+                        if index == 0 {
+                            first_row = Some(row.response().rect);
+                        }
                     });
                 });
+            table_resize_handles(
+                ui,
+                "train_stops",
+                &specs,
+                &mut widths,
+                &edges,
+                first_row,
+                theme::detail_header_height(),
+                Col::resizable,
+            );
             paint_header_line(ui, header_top, theme::detail_header_height());
         },
     );
@@ -3711,42 +4060,179 @@ fn via_entry_summary(via: &[ViaPoint]) -> String {
     format!("{} 途经点 · {total} km", via.len())
 }
 
-/// 整行可点击的折叠标题，返回当前是否展开。
+/// 量一行文字的宽度（不换行、不截断），用来给固定宽的格子定宽。
+fn text_width(ui: &Ui, text: &str, font: egui::FontId) -> f32 {
+    ui.ctx().fonts_mut(|fonts| {
+        fonts
+            .layout_no_wrap(text.to_owned(), font, egui::Color32::PLACEHOLDER)
+            .size()
+            .x
+    })
+}
+
+/// 明细页入口条里的一格：折叠三角 + 标题 + 弱化摘要 + 尾部「查看 ▸」。
 ///
-/// 标题文字用子 UI 绘制，点击区域在这之后用 `interact` 叠在整行上，
-/// 这样点到文字也能切换；悬停底色在绘制内容前按指针位置判断。
-fn via_header_ui(ui: &mut Ui, id: egui::Id, summary: String) -> bool {
-    let stored = ui.data(|data| data.get_temp::<bool>(id)).unwrap_or(false);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), Sense::hover());
-    let hovered = ui.rect_contains_pointer(rect);
+/// 以前这三处入口各写了一份（窄屏的经由、宽屏的经由折叠标题、桌面的开行计划）：
+/// 行高两套、细线一处两条一处一条、箭头一处左一处右，叠在一起就是「双线 + 错位」。
+/// 现在统一成这一个格子，差别只剩字段。
+struct Entry<'a> {
+    /// 悬停/点击用的 id，同时也是点中后的回传值。
+    id: &'a str,
+    /// 粗体标题。
+    title: &'a str,
+    /// 标题后面的弱化摘要，空串表示不画。
+    summary: &'a str,
+    /// 右端的弱化提示（「查看」），空串表示不画（连箭头一起）。
+    hint: &'a str,
+    /// 左端的折叠三角：`Some(展开状态)`；`None` 表示这一格不折叠。
+    arrow: Option<bool>,
+    /// 固定宽度；`None` = 分掉剩下的宽度。
+    width: Option<f32>,
+    /// 整格的悬停提示，空串表示没有。
+    hover: &'a str,
+}
+
+/// 一格入口的自然宽度：标题 + 摘要 + 尾部「查看 ▸」+ 左右内边距。
+///
+/// 两个入口并排时，带长摘要的那格（经由）分剩下的宽度，另一格用这个宽度就够。
+fn entry_natural_width(ui: &Ui, entry: &Entry<'_>) -> f32 {
+    let arrow_width = 14.0;
+    let mut width = 2.0 * theme::GAP_S
+        + text_width(
+            ui,
+            entry.title,
+            egui::FontId::new(theme::FONT_BODY, fonts::bold_family()),
+        );
+    if entry.arrow.is_some() {
+        width += arrow_width + theme::GAP_XS;
+    }
+    if !entry.summary.is_empty() {
+        width += theme::GAP_S
+            + text_width(
+                ui,
+                entry.summary,
+                egui::FontId::proportional(theme::FONT_META),
+            );
+    }
+    if !entry.hint.is_empty() {
+        width += theme::GAP_S
+            + text_width(ui, entry.hint, egui::FontId::proportional(theme::FONT_META))
+            + theme::GAP_XS
+            + arrow_width;
+    }
+    width
+}
+
+/// 入口条：一条上细线 + 一行入口 + 一条下细线，返回被点中那一格的 `id`。
+///
+/// 细线由这里统一画，调用方前后**只留空白**，不要再补 `ui.separator()`。
+/// 格子之间留 `GAP_M`，悬停底色各管各的 —— 两个入口并排时不会看成一整条。
+fn entry_bar_ui<'a>(ui: &mut Ui, entries: &'a [Entry<'a>]) -> Option<&'a str> {
+    if entries.is_empty() {
+        return None;
+    }
+    let height = theme::control_height();
+    let total = ui.available_width();
+    let gap = theme::GAP_M;
+    let gaps = gap * (entries.len() - 1) as f32;
+    let fixed: f32 = entries.iter().filter_map(|entry| entry.width).sum();
+    let flex_count = entries.iter().filter(|entry| entry.width.is_none()).count();
+    let flex = if flex_count == 0 {
+        0.0
+    } else {
+        ((total - fixed - gaps) / flex_count as f32).max(48.0)
+    };
+
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(total, height), Sense::hover());
+    let hairline = egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
+    ui.painter().hline(rect.x_range(), rect.top(), hairline);
+    ui.painter().hline(rect.x_range(), rect.bottom(), hairline);
+
+    let mut clicked = None;
+    let mut left = rect.left();
+    for entry in entries {
+        let width = entry.width.unwrap_or(flex);
+        let cell =
+            egui::Rect::from_min_size(egui::pos2(left, rect.top()), egui::vec2(width, height));
+        if entry_cell_ui(ui, cell, entry) {
+            clicked = Some(entry.id);
+        }
+        left += width + gap;
+    }
+    clicked
+}
+
+/// 入口条里的一格；返回是否被点中。
+///
+/// 文字用子 UI 画，点击区域在这之后用 `interact` 叠在整个格子上——点到文字也能中；
+/// 悬停底色在画内容之前按指针位置判断。
+fn entry_cell_ui(ui: &mut Ui, cell: egui::Rect, entry: &Entry<'_>) -> bool {
+    let hovered = ui.rect_contains_pointer(cell);
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         ui.painter().rect_filled(
-            rect,
+            cell,
             egui::CornerRadius::same(4),
             ui.visuals().widgets.hovered.weak_bg_fill,
         );
     }
     let weak = ui.visuals().weak_text_color();
+    // 尾部「查看 ▸」先量出来，摘要按剩下的宽度截断，长摘要不会压到箭头底下。
+    let arrow_width = 14.0;
+    let trailing = if entry.hint.is_empty() {
+        0.0
+    } else {
+        text_width(ui, entry.hint, egui::FontId::proportional(theme::FONT_META))
+            + theme::GAP_XS
+            + arrow_width
+            + theme::GAP_S
+    };
     let mut row = ui.new_child(
         egui::UiBuilder::new()
-            .max_rect(rect)
+            .max_rect(cell)
             .layout(Layout::left_to_right(Align::Center)),
     );
-    collapse_arrow(&mut row, stored, weak);
-    row.add_space(theme::GAP_XS);
-    row.label(bold("经由").size(theme::FONT_BODY));
+    // 间距全由下面显式 `add_space` 给：留默认的 `item_spacing` 会和它叠成两倍，
+    // `entry_natural_width` 算出来的宽度就对不上，格子会挤到叠字。
+    row.spacing_mut().item_spacing.x = 0.0;
     row.add_space(theme::GAP_S);
-    row.add(egui::Label::new(meta(summary.clone()).weak()).truncate())
-        .on_hover_text(summary);
+    if let Some(open) = entry.arrow {
+        collapse_arrow(&mut row, open, weak);
+        row.add_space(theme::GAP_XS);
+    }
+    row.label(bold(entry.title).size(theme::FONT_BODY));
+    if !entry.summary.is_empty() {
+        row.add_space(theme::GAP_S);
+        let used = row.cursor().left() - cell.left();
+        let budget = (cell.width() - used - trailing).max(0.0);
+        row.allocate_ui_with_layout(
+            egui::vec2(budget, cell.height()),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                ui.add(egui::Label::new(meta(entry.summary).weak()).truncate());
+            },
+        );
+    }
+    if !entry.hint.is_empty() {
+        row.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.add_space(theme::GAP_S);
+            collapse_arrow(ui, false, weak);
+            ui.add_space(theme::GAP_XS);
+            ui.label(meta(entry.hint).weak());
+        });
+    }
     drop(row);
 
-    let response = ui.interact(rect, id.with("hit"), Sense::click());
-    let open = if response.clicked() { !stored } else { stored };
-    if response.clicked() {
-        ui.data_mut(|data| data.insert_temp(id, open));
+    let response = ui.interact(
+        cell,
+        ui.make_persistent_id(("llt-entry", entry.id)),
+        Sense::click(),
+    );
+    let clicked = response.clicked();
+    if !entry.hover.is_empty() {
+        response.on_hover_text(entry.hover);
     }
-    open
+    clicked
 }
 
 /// 交路 / 车型 / 餐车等信息行；经由由调用方在下方单独绘制。
@@ -3770,6 +4256,9 @@ fn extras_ui(
     date: i64,
     link: &mut Option<DetailLink>,
     plan: &mut RunPlan<'_>,
+    // 桌面：开行计划是否由本函数在尾上画一行入口。宽屏把它挪到下面的入口条
+    // （和经由并排一行），那时传 `false`。
+    plan_entry: bool,
 ) {
     let (duties, dining, matched) = extras.for_date(date);
     ui.spacing_mut().item_spacing.y = 6.0;
@@ -3858,14 +4347,17 @@ fn extras_ui(
         });
     }
 
-    ui.add_space(theme::GAP_S);
-    // 桌面默认收起：2016 年那种月历摆在侧栏里会把停站表挤掉两三行，
-    // 与经由一样只留一行入口，点开在弹窗里看。手机整页反过来——那里本来就
-    // 是滚动的一页，日历内嵌最省事，不用再开一层。
+    // 手机整页：月历直接内嵌在这页里（本来就是滚动的一页，再开一层弹窗反而绕）；
+    // 桌面只留一行入口——宽屏时入口在下面的入口条里（见 `detail_ui`），
+    // 窄窗口的底部面板没那么宽，入口就接在杂项后面。
     if theme::pointer() == theme::Pointer::Touch {
+        ui.add_space(theme::GAP_S);
         run_plan_ui(ui, train, plan, true);
-    } else if run_plan_entry(ui, train) {
-        *plan.open = true;
+    } else if plan_entry {
+        ui.add_space(theme::GAP_S);
+        if run_plan_entry(ui) {
+            *plan.open = true;
+        }
     }
 }
 
@@ -3898,6 +4390,7 @@ fn run_plan_page_ui(
         .backdrop_color(egui::Color32::from_black_alpha(120))
         .show(ui.ctx(), |ui| {
             ui.set_min_width(width - 24.0);
+            ui.set_max_width(width - 24.0);
             ui.horizontal(|ui| {
                 ui.label(bold("开行计划").size(theme::FONT_SECTION));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -3916,58 +4409,25 @@ fn run_plan_page_ui(
     }
 }
 
-/// 桌面端的「开行计划」入口行，样式与经由入口一致。
-fn run_plan_entry(ui: &mut Ui, train: &TrainSummary) -> bool {
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), theme::control_height()),
-        Sense::hover(),
-    );
-    let hovered = ui.rect_contains_pointer(rect);
-    if hovered {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        ui.painter().rect_filled(
-            rect,
-            egui::CornerRadius::same(4),
-            ui.visuals().widgets.hovered.weak_bg_fill,
-        );
+/// 「开行计划」入口格：桌面上占一行入口，点开看月历。
+///
+/// 摘要（`2026-07-01 起 · 月历`）不画：同一页的抬头下面已经写过一遍开行区间，
+/// 再挂一串灰字只是噪声。`width` 给定时就是和经由并排时的固定宽。
+fn plan_entry(width: Option<f32>) -> Entry<'static> {
+    Entry {
+        id: "run-plan",
+        title: "开行计划",
+        summary: "",
+        hint: "查看",
+        arrow: None,
+        width,
+        hover: "按日历看这趟车每天开不开行",
     }
-    ui.painter().hline(
-        rect.x_range(),
-        rect.top(),
-        egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
-    );
-    let summary = format!(
-        "{} · {}",
-        date_window(train.date_from, train.date_to),
-        "月历"
-    );
-    let weak = ui.visuals().weak_text_color();
-    let mut row = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(rect)
-            .layout(Layout::left_to_right(Align::Center)),
-    );
-    row.add_space(theme::GAP_S);
-    row.label(bold("开行计划").size(theme::FONT_BODY));
-    row.add_space(theme::GAP_S);
-    row.add(egui::Label::new(meta(summary.clone()).weak()).truncate())
-        .on_hover_text(summary);
-    row.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        collapse_arrow(ui, false, weak);
-        ui.add_space(theme::GAP_XS);
-        ui.label(meta("查看").weak());
-        ui.add_space(theme::GAP_S);
-    });
-    drop(row);
+}
 
-    let response = ui.interact(
-        rect,
-        ui.make_persistent_id("llt-run-plan-trigger"),
-        Sense::click(),
-    );
-    let clicked = response.clicked();
-    response.on_hover_text("按日历看这趟车每天开不开行");
-    clicked
+/// 桌面端单独一行的「开行计划」入口（窄窗口的底部详情面板）。
+fn run_plan_entry(ui: &mut Ui) -> bool {
+    entry_bar_ui(ui, &[plan_entry(None)]) == Some("run-plan")
 }
 
 /// 开行计划日历：一天一格，可翻月。
@@ -3986,51 +4446,58 @@ fn run_plan_ui(ui: &mut Ui, train: &TrainSummary, plan: &mut RunPlan<'_>, with_t
     }
 
     let cell = theme::plan_cell_size(ui.available_width());
-    ui.horizontal(|ui| {
-        // 弹窗自己有标题，这里只留区间与翻月。
-        if with_title {
-            ui.label(bold("开行计划").size(theme::FONT_BODY));
-            ui.add_space(theme::GAP_S);
-        }
-        // 开行区间在标题下面已经写过一遍（`开行 2026-11-25 ~ 2080-12-31`），
-        // 这里不再重复：重复的区间会把翻月挤到只剩省略号。
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            // 翻月：方形按钮、与控件同高，字形放大到 19 点再加粗。
-            // 之前用 13 点的小字跟日历格子同宽，落在按钮里像两个小点，
-            // 几项之间又只隔 4 点，整排挤在一起。
-            let step = theme::control_height();
-            ui.spacing_mut().item_spacing.x = theme::GAP_S;
-            ui.spacing_mut().interact_size = egui::vec2(step, step);
-            // 箭头字号比按钮默认文字大，内边距收窄一点，按钮才不会被撑得比同行控件高。
-            ui.spacing_mut().button_padding = egui::vec2(theme::GAP_XS, 1.0);
-            let arrow = |glyph: &str| {
-                RichText::new(glyph)
-                    .size(theme::FONT_BODY + 4.0)
-                    .family(fonts::bold_family())
-            };
-            // `interact_size` 只管高度，按钮宽度还得显式给：不给就是「一个字 + 内边距」，
-            // 于是 19 点的箭头被塞进 13 点的窄条里（实测 13×37）。
-            if ui
-                .add(egui::Button::new(arrow("›")).min_size(egui::vec2(step, step)))
-                .on_hover_text("下一个月")
-                .clicked()
-            {
-                *plan.month = shift_month(*plan.month, 1);
+    // 星期表头与日期格固定 7 列、格间距 2 点：月份选择器要和这块网格右对齐，
+    // 不能按弹窗/侧栏的整个宽度右对齐（那样会跑到日历右边去）。
+    let grid_width = cell * 7.0 + 2.0 * 6.0;
+    ui.allocate_ui_with_layout(
+        egui::vec2(grid_width, theme::control_height()),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            // 弹窗自己有标题，这里只留区间与翻月。
+            if with_title {
+                ui.label(bold("开行计划").size(theme::FONT_BODY));
+                ui.add_space(theme::GAP_S);
             }
-            ui.label(
-                RichText::new(month_label(*plan.month))
-                    .size(theme::FONT_BODY)
-                    .weak(),
-            );
-            if ui
-                .add(egui::Button::new(arrow("‹")).min_size(egui::vec2(step, step)))
-                .on_hover_text("上一个月")
-                .clicked()
-            {
-                *plan.month = shift_month(*plan.month, -1);
-            }
-        });
-    });
+            // 开行区间在标题下面已经写过一遍（`开行 2026-11-25 ~ 2080-12-31`），
+            // 这里不再重复：重复的区间会把翻月挤到只剩省略号。
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                // 翻月：方形按钮、与控件同高，字形放大到 19 点再加粗。
+                // 之前用 13 点的小字跟日历格子同宽，落在按钮里像两个小点，
+                // 几项之间又只隔 4 点，整排挤在一起。
+                let step = theme::control_height();
+                ui.spacing_mut().item_spacing.x = theme::GAP_S;
+                ui.spacing_mut().interact_size = egui::vec2(step, step);
+                // 箭头字号比按钮默认文字大，内边距收窄一点，按钮才不会被撑得比同行控件高。
+                ui.spacing_mut().button_padding = egui::vec2(theme::GAP_XS, 1.0);
+                let arrow = |glyph: &str| {
+                    RichText::new(glyph)
+                        .size(theme::FONT_BODY + 4.0)
+                        .family(fonts::bold_family())
+                };
+                // `interact_size` 只管高度，按钮宽度还得显式给：不给就是「一个字 + 内边距」，
+                // 于是 19 点的箭头被塞进 13 点的窄条里（实测 13×37）。
+                if ui
+                    .add(egui::Button::new(arrow("›")).min_size(egui::vec2(step, step)))
+                    .on_hover_text("下一个月")
+                    .clicked()
+                {
+                    *plan.month = shift_month(*plan.month, 1);
+                }
+                ui.label(
+                    RichText::new(month_label(*plan.month))
+                        .size(theme::FONT_BODY)
+                        .weak(),
+                );
+                if ui
+                    .add(egui::Button::new(arrow("‹")).min_size(egui::vec2(step, step)))
+                    .on_hover_text("上一个月")
+                    .clicked()
+                {
+                    *plan.month = shift_month(*plan.month, -1);
+                }
+            });
+        },
+    );
 
     let year = (*plan.month / 100) as i16;
     let month = (*plan.month % 100) as i8;
@@ -4185,124 +4652,76 @@ struct DetailToggles<'a> {
     via_page_open: &'a mut bool,
 }
 
-/// 宽屏详情侧栏里的经由折叠项 + 图例 + 表格。
+/// 宽屏侧栏就地展开的经由表（点入口条上的「经由」后出现在它下面）。
 ///
-/// `fill` 为真时表格吃到面板剩余的全部高度（此时停站表不再绘制）；
-/// 为假时只画折叠标题本身。图例行右侧的「放大」打开封顶尺寸的居中弹窗。
-fn via_section_ui(
+/// 入口那一行不在这里画：它和「开行计划」并排在 `entry_bar_ui` 的一条线上，
+/// 所以本函数只管展开之后的工具行与表格。
+fn via_inline_ui(
     ui: &mut Ui,
     via: &[ViaPoint],
     toggles: &mut DetailToggles<'_>,
     stops: &[Stop],
     train_index: i64,
-    fill: bool,
 ) {
     if via.is_empty() {
         return;
     }
-    let open = via_header_ui(ui, via_state_id(train_index), via_entry_summary(via));
-    if open {
-        ui.add_space(theme::GAP_XS);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().interact_size.y = 24.0;
-            ui.spacing_mut().item_spacing.x = theme::GAP_XS;
-            ui.checkbox(toggles.stations_only, meta("只看车站"));
-            ui.add_space(theme::GAP_M);
-            via_legend_ui(ui);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui
-                    .add(egui::Button::new(meta("放大")).min_size(egui::vec2(48.0, 24.0)))
-                    .on_hover_text("在居中的大窗口里查看经由")
-                    .clicked()
-                {
-                    *toggles.via_page_open = true;
-                }
-            });
+    ui.horizontal(|ui| {
+        ui.spacing_mut().interact_size.y = 24.0;
+        ui.spacing_mut().item_spacing.x = theme::GAP_XS;
+        ui.checkbox(toggles.stations_only, meta("只看车站"));
+        ui.add_space(theme::GAP_M);
+        via_legend_ui(ui);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui
+                .add(egui::Button::new(meta("放大")).min_size(egui::vec2(48.0, 24.0)))
+                .on_hover_text("在居中的大窗口里查看经由")
+                .clicked()
+            {
+                *toggles.via_page_open = true;
+            }
         });
-        ui.add_space(theme::GAP_XS);
-        // 高度按整行取整，避免表格底部出现半截行。
-        let pitch = theme::detail_row_height() + ui.spacing().item_spacing.y;
-        let max_height = if fill {
-            let raw = ui.available_height();
-            let rows = ((raw - theme::detail_header_height()) / pitch)
-                .floor()
-                .max(1.0);
-            theme::detail_header_height() + rows * pitch
-        } else {
-            let raw = (ui.available_height() * 0.5).clamp(104.0, 218.0);
-            let rows = ((raw - theme::detail_header_height()) / pitch)
-                .floor()
-                .clamp(1.0, 6.0);
-            theme::detail_header_height() + rows * pitch
-        };
-        via_table_ui(
-            ui,
-            via,
-            *toggles.stations_only,
-            stops,
-            train_index,
-            max_height,
-            "inline",
-        );
-    }
+    });
+    ui.add_space(theme::GAP_XS);
+    // 高度按整行取整，避免表格底部出现半截行。
+    let pitch = theme::detail_row_height() + ui.spacing().item_spacing.y;
+    let rows = ((ui.available_height() - theme::detail_header_height()) / pitch)
+        .floor()
+        .max(1.0);
+    let max_height = theme::detail_header_height() + rows * pitch;
+    via_table_ui(
+        ui,
+        via,
+        *toggles.stations_only,
+        stops,
+        train_index,
+        max_height,
+        "inline",
+    );
 }
 
-/// 窄屏时停站表上方的经由入口：整行可点，打开独立经由页。
+/// 窄屏时停站表上方的经由入口：整条可点，打开独立经由页。
 ///
-/// 上下内边距对称：行高是 `control_height()`、文字行在中间，上下各留同样多的空；
-/// 两条细线由本函数自己画（入口是一段独立的东西，不是表格的一部分）。
-/// 调用方前后只要各留 `GAP_S`，**不要**再补 `ui.separator()`——那样会变成两条线，
-/// 且入口看上去离上面的细线远、离下面的近。
+/// 行高、悬停底色、上下两条细线都在 `entry_bar_ui` 里，和宽屏那条「经由 + 开行计划」
+/// 入口用的是同一个格子。调用方前后只要各留 `GAP_S`，**不要**再补 `ui.separator()`
+/// ——那样会变成两条线，且入口看上去离上面的细线远、离下面的近。
 fn via_page_trigger(ui: &mut Ui, via: &[ViaPoint], open: &mut bool) {
     if via.is_empty() {
         return;
     }
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), theme::control_height()),
-        Sense::hover(),
-    );
-    let hovered = ui.rect_contains_pointer(rect);
-    if hovered {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        ui.painter().rect_filled(
-            rect,
-            egui::CornerRadius::same(4),
-            ui.visuals().widgets.hovered.weak_bg_fill,
-        );
-    }
-    let hairline = egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
-    ui.painter().hline(rect.x_range(), rect.top(), hairline);
-    ui.painter().hline(rect.x_range(), rect.bottom(), hairline);
     let summary = via_entry_summary(via);
-    let weak = ui.visuals().weak_text_color();
-    let mut row = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(rect)
-            .layout(Layout::left_to_right(Align::Center)),
-    );
-    row.add_space(theme::GAP_S);
-    row.label(bold("经由").size(theme::FONT_BODY));
-    row.add_space(theme::GAP_S);
-    row.add(egui::Label::new(meta(summary.clone()).weak()).truncate())
-        .on_hover_text(summary);
-    row.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        collapse_arrow(ui, false, weak);
-        ui.add_space(theme::GAP_XS);
-        ui.label(meta("查看").weak());
-        ui.add_space(theme::GAP_S);
-    });
-    drop(row);
-
-    // 子 UI 会挡住 allocate 的响应，和折叠标题一样在最后叠一层交互。
-    let response = ui.interact(
-        rect,
-        ui.make_persistent_id("llt-via-page-trigger"),
-        Sense::click(),
-    );
-    if response.clicked() {
+    let entries = [Entry {
+        id: "via-page",
+        title: "经由",
+        summary: &summary,
+        hint: "查看",
+        arrow: None,
+        width: None,
+        hover: "打开经由页",
+    }];
+    if entry_bar_ui(ui, &entries).is_some() {
         *open = true;
     }
-    response.on_hover_text("打开经由页");
 }
 
 /// 独立经由页。
@@ -4474,60 +4893,273 @@ fn cell_layout() -> Layout {
     Layout::left_to_right(Align::Center)
 }
 
-/// 一组「表格列」选择器：`自动` + 每个候选列一个 chip。
+/// 一张表的列清单：上半是已显示的列（按用户顺序），下半是没显示的列。
 ///
-/// `picked` 是自定义列（`None` = 自动）。点了某一列就把当前看到的这份
-/// （自动模式取 `auto`，自定义模式取用户选的）加减一格；最后一列不允许取消，
-/// 表里至少得留一列。
-fn column_picker<C: Copy + PartialEq>(
+/// `picked = None`（自动）时清单显示当前宽度下自动挑的列；任何勾选/拖动都会切成
+/// 自定义，并照眼前这份加减。勾选把列排到已显示块的末尾；取消勾选把它送到清单最后；
+/// 拖动只在已显示的行之间换顺序（没显示的行没有拖动把手）。
+fn column_list<C: Copy + PartialEq + Send + Sync + 'static>(
     ui: &mut Ui,
-    title: &str,
+    salt: &'static str,
     picked: &mut Option<Vec<C>>,
     auto: Vec<C>,
     all: &[C],
     spec: fn(C) -> columns::Spec<C>,
+    compact: bool,
 ) {
-    let current: Vec<C> = picked.clone().unwrap_or(auto);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = theme::GAP_XS;
+    if compact {
+        // 弹窗里行距再紧一档：13 行一屏能放下，少滚一次。
         ui.spacing_mut().item_spacing.y = 2.0;
-        // 组名用粗体小字：chip 会换行，组名散在行首和行中时得靠字重分得清是哪一组的。
-        ui.label(
-            RichText::new(title)
-                .size(theme::FONT_META)
-                .family(fonts::bold_family()),
-        );
-        // 「自动」：清掉自定义，回到按宽度挑列。
-        if ui
-            .selectable_label(
-                picked.is_none(),
-                RichText::new("自动").size(theme::FONT_META),
-            )
-            .on_hover_text("按窗口宽度自动挑列（默认）")
-            .clicked()
-            && picked.is_some()
-        {
-            *picked = None;
+    }
+    let visible: Vec<C> = picked.clone().unwrap_or(auto);
+
+    // 顺序：显示中的列先按用户顺序排；没显示的按声明顺序兜底。之后整份顺序都会
+    // 被拖动改写并存起来，所以「没显示」的列也可以先拖到想要的位置再勾上。
+    let order_id = egui::Id::unique((salt, "order"));
+    let mut order: Vec<C> = ui.data(|data| data.get_temp(order_id)).unwrap_or_default();
+    order.retain(|column| all.contains(column));
+    for (index, column) in visible.iter().enumerate() {
+        if order.contains(column) {
+            continue;
         }
-        for column in all {
-            let on = current.contains(column);
-            let head = spec(*column).head;
-            let response = ui.selectable_label(on, RichText::new(head).size(theme::FONT_META));
-            if response.clicked() {
-                let mut next = current.clone();
-                if on {
-                    // 至少留一列：取消最后一列就当没点。
-                    if next.len() > 1 {
-                        next.retain(|other| other != column);
+        // 新出现的列（比如窗口变宽后自动加进来的）接在上一个可见列后面。
+        let at = if index == 0 {
+            0
+        } else {
+            order
+                .iter()
+                .position(|other| other == &visible[index - 1])
+                .map_or(order.len(), |position| position + 1)
+        };
+        order.insert(at.min(order.len()), *column);
+    }
+    for column in all {
+        if !order.contains(column) {
+            order.push(*column);
+        }
+    }
+
+    // 「自动」行：勾着表示按窗口宽度挑列；点它清掉自定义。已经是自动时点它不做事，
+    // 想改成自定义直接勾选/拖动任意一列即可。
+    let auto_on = picked.is_none();
+    if column_row(ui, "自动 · 按窗口宽度挑列", auto_on, false, false, compact)
+        .response
+        .clicked()
+        && !auto_on
+    {
+        *picked = None;
+    }
+
+    let drag_id = egui::Id::unique((salt, "drag"));
+    // 存的是 `Option<usize>`，取出来也是 `Option<Option<usize>>`，要再摊平一次。
+    let mut drag_from: Option<usize> = ui
+        .data(|data| data.get_temp::<Option<usize>>(drag_id))
+        .flatten();
+    let mut drag_started = None;
+    let mut row_rects: Vec<egui::Rect> = Vec::new();
+    let mut toggled: Option<C> = None;
+
+    for (index, column) in order.iter().enumerate() {
+        let checked = visible.contains(column);
+        let cell = column_row(
+            ui,
+            spec(*column).head,
+            checked,
+            checked,
+            drag_from == Some(index),
+            compact,
+        );
+        row_rects.push(cell.rect);
+        if cell.response.drag_started() {
+            drag_started = Some(index);
+        }
+        if cell.response.clicked() {
+            toggled = Some(*column);
+        }
+    }
+
+    if let Some(column) = toggled {
+        if visible.contains(&column) {
+            // 取消勾选：至少留一列，最后一列点了就当没点。取消的列排到清单最后，
+            // 想再勾回来也能一眼找到；显示中的列顺序保持不变。
+            if visible.len() > 1 {
+                order.retain(|other| other != &column);
+                order.push(column);
+                *picked = Some(
+                    order
+                        .iter()
+                        .copied()
+                        .filter(|other| visible.contains(other) && other != &column)
+                        .collect(),
+                );
+            }
+        } else {
+            // 勾选：排到已显示块的末尾（即清单里第一个没显示的项之前）。
+            order.retain(|other| other != &column);
+            let at = visible.len().min(order.len());
+            order.insert(at, column);
+            *picked = Some(
+                order
+                    .iter()
+                    .copied()
+                    .filter(|other| visible.contains(other) || other == &column)
+                    .collect(),
+            );
+        }
+    } else {
+        if drag_from.is_none() {
+            drag_from = drag_started;
+        }
+        if let Some(from) = drag_from {
+            if ui.input(|input| input.pointer.any_down()) {
+                if let Some(pointer) = ui.ctx().pointer_latest_pos() {
+                    // 只有指针越过相邻行的中线才换位：拖着自己那行的下半边不会误触发。
+                    let mut to = from;
+                    for (index, rect) in row_rects.iter().enumerate() {
+                        let center = rect.center().y;
+                        if index > from && pointer.y > center {
+                            to = index;
+                        } else if index < from && pointer.y < center {
+                            to = index;
+                            break;
+                        }
                     }
-                } else {
-                    next.push(*column);
+                    if to != from && from < order.len() {
+                        let column = order.remove(from);
+                        // 只在已显示块内换位：拖出这块就贴到已显示列的末尾。
+                        let to = to.min(visible.len().saturating_sub(1)).min(order.len());
+                        order.insert(to, column);
+                        *picked = Some(
+                            order
+                                .iter()
+                                .copied()
+                                .filter(|other| visible.contains(other))
+                                .collect(),
+                        );
+                        drag_from = Some(to);
+                    }
                 }
-                // 顺序由声明固定，这里只筛不排。
-                *picked = Some(all.iter().copied().filter(|c| next.contains(c)).collect());
+            } else {
+                drag_from = None;
             }
         }
-    });
+    }
+
+    ui.data_mut(|data| data.insert_temp(order_id, order));
+    ui.data_mut(|data| data.insert_temp(drag_id, drag_from));
+}
+
+/// 列清单的一行：左边拖动把手 + 复选框 + 名称。
+///
+/// 整行一个 `click_and_drag` 命中区：触摸时点一下切换显示、按住拖动换顺序，
+/// 不用瞄着那个小复选框点。隐藏的列不可拖（顺序只对显示中的列有意义）。
+fn column_row(
+    ui: &mut Ui,
+    label: &str,
+    checked: bool,
+    draggable: bool,
+    dragging: bool,
+    compact: bool,
+) -> ColumnRow {
+    let height = if compact {
+        theme::popup_column_row_height()
+    } else {
+        theme::column_row_height()
+    };
+    let sense = if draggable {
+        Sense::click_and_drag()
+    } else {
+        Sense::click()
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), sense);
+
+    let fill = if dragging {
+        Some(ui.visuals().selection.bg_fill)
+    } else if response.hovered() {
+        Some(ui.visuals().widgets.hovered.weak_bg_fill)
+    } else {
+        None
+    };
+    if let Some(fill) = fill {
+        ui.painter().rect_filled(rect, 6.0, fill);
+    }
+
+    let check = if compact {
+        theme::popup_checkbox_size()
+    } else {
+        theme::checkbox_size()
+    };
+    let pad = 6.0;
+    let grip = if draggable { check } else { 0.0 };
+    let box_rect = egui::Rect::from_center_size(
+        egui::pos2(
+            rect.left() + pad + grip + check * 0.5 + if draggable { 6.0 } else { 0.0 },
+            rect.center().y,
+        ),
+        egui::vec2(check, check),
+    );
+
+    // 拖动把手：六个小点，比一条横线更像「可抓」，触摸时也看得清。
+    if draggable {
+        let color = if dragging {
+            theme::accent(ui)
+        } else {
+            theme::meta_color(ui)
+        };
+        let dot = if dragging { 2.0 } else { 1.6 };
+        let center_x = rect.left() + pad + grip * 0.5;
+        for row in 0..3 {
+            for col in 0..2 {
+                let offset = egui::vec2(
+                    (col as f32 - 0.5) * dot * 4.0,
+                    (row as f32 - 1.0) * dot * 4.0,
+                );
+                ui.painter().circle_filled(
+                    egui::pos2(center_x, rect.center().y) + offset,
+                    dot,
+                    color,
+                );
+            }
+        }
+    }
+
+    if checked {
+        ui.painter().rect_filled(box_rect, 4.0, theme::accent(ui));
+        let stroke = egui::Stroke::new((check * 0.11).max(1.5), theme::on_accent_text(ui));
+        let point =
+            |x: f32, y: f32| egui::pos2(box_rect.left() + check * x, box_rect.top() + check * y);
+        ui.painter()
+            .line_segment([point(0.22, 0.52), point(0.42, 0.72)], stroke);
+        ui.painter()
+            .line_segment([point(0.42, 0.72), point(0.78, 0.30)], stroke);
+    } else {
+        ui.painter().rect_stroke(
+            box_rect,
+            4.0,
+            egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    let color = if checked {
+        ui.visuals().strong_text_color()
+    } else {
+        theme::meta_color(ui)
+    };
+    ui.painter().text(
+        egui::pos2(box_rect.right() + theme::GAP_S, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(theme::FONT_BODY),
+        color,
+    );
+
+    ColumnRow { response, rect }
+}
+
+struct ColumnRow {
+    response: egui::Response,
+    rect: egui::Rect,
 }
 
 /// 输入框下方的候选站下拉列表（车站页与站站页共用）。
@@ -4596,12 +5228,13 @@ fn candidates_popup(
     picked
 }
 
-/// 一张「横竖都能滚」的固定列宽表格：外层负责滚动，表格只负责铺行列。
+/// 一张「横竖都能滚」的列表表格：外层负责滚动，表格只负责铺行列。
 ///
 /// `TableBuilder` 自带的滚动区只有纵向：列宽超出视口时右边直接被裁掉，手势也拖不出
 /// 横向滚动；而「外层管横向 + 内层管纵向」两个 `ScrollArea` 也不行——内层会把手指拖动
 /// 整段吃掉。所以四张表统一成：外层一个两向 `ScrollArea` 负责滚动，表格自己
-/// `drag_to_scroll(Never)`，列一律 `Column::exact`。
+/// `drag_to_scroll(Never)`，列宽由 [`resizable_columns`] 铺（初始宽度按可用宽度算，
+/// 用户可以拖分隔线改）。
 ///
 /// `height` 是内容高度（表头 + 全部行）；`build` 拿到的是**内容可用宽度**——已经扣掉
 /// 滚动条，按它算列宽才不会因为多算 8 点而凭空多出一条横向滚动条。
@@ -4672,7 +5305,7 @@ fn column_widths<C>(specs: &[columns::Spec<C>], available: f32, spacing: f32) ->
     (widths, total.max(available))
 }
 
-/// 按列规格把 `TableBuilder` 的列设成固定宽度。
+/// 按列宽铺列。宽度由 [`table_widths`] 统一管，拖动改的是那份宽度。
 fn exact_columns<'a>(mut table: TableBuilder<'a>, widths: &[f32]) -> TableBuilder<'a> {
     for width in widths {
         table = table.column(Column::exact(*width));
@@ -4680,9 +5313,189 @@ fn exact_columns<'a>(mut table: TableBuilder<'a>, widths: &[f32]) -> TableBuilde
     table
 }
 
+/// 每张表的列宽。
+///
+/// 首次、可视宽度变化、列集合变化时按内容重算；其余时候保留用户拖出来的宽度
+/// （存在 egui 临时内存里，按 `salt` 区分）。`computed` 是这一帧算出的自适应宽度。
+fn table_widths<C>(
+    ui: &Ui,
+    salt: &str,
+    specs: &[columns::Spec<C>],
+    computed: Vec<f32>,
+) -> Vec<f32> {
+    let id = egui::Id::unique((salt, "widths"));
+    let changed = column_layout_changed(ui, salt);
+    let stored: Option<Vec<f32>> = ui.data(|data| data.get_temp(id));
+    match stored {
+        Some(widths) if !changed && widths.len() == specs.len() => widths,
+        _ => {
+            ui.data_mut(|data| data.insert_temp(id, computed.clone()));
+            computed
+        }
+    }
+}
+
+/// 正在拖动的那一列（表头加粗、分隔线加粗用）。读的是上一帧记下的结果。
+fn table_active_column(ui: &Ui, salt: &str) -> Option<usize> {
+    ui.data(|data| data.get_temp::<Option<usize>>(egui::Id::unique((salt, "resize_active"))))
+        .flatten()
+}
+
+/// 列分隔线的拖动调整。
+///
+/// 触摸屏上只在**表头**那一条横带里认分隔线，而且要先按住约 [`RESIZE_LONG_PRESS`]
+/// 秒才进入调整：手指从行上开始拖动是滚动，不能因为擦到列边就把列宽改了。
+/// 鼠标没有长按限制，整根分隔线都能拖。
+///
+/// 拖动中的那一列表头加粗、分隔线加粗成强调色。
+fn table_resize_handles<C: Copy>(
+    ui: &mut Ui,
+    salt: &str,
+    specs: &[columns::Spec<C>],
+    widths: &mut [f32],
+    edges: &[f32],
+    first_row: Option<egui::Rect>,
+    header_height: f32,
+    resizable: fn(C) -> bool,
+) {
+    let Some(first_row) = first_row else {
+        return;
+    };
+    let touch = theme::pointer() == theme::Pointer::Touch;
+    let line_bottom = ui.min_rect().bottom();
+    let spacing = ui.spacing().item_spacing.x;
+    let grab = theme::resize_grab_radius();
+    // 只有表头那一条横带能调宽：行上的拖动（哪怕贴着分隔线）全部留给外层
+    // 滚动区，表格该横滚/竖滚照常。触摸时还要先按住约 0.4 秒。
+    // 表头顶从第一行上沿反推——第一行的命中坐标是准的（点行是好的）。
+    let top = first_row.top() - header_height;
+    let band_bottom = first_row.top();
+
+    // 自己记按下时刻：egui 没有公开的 `press_start_time()`。
+    let press_id = egui::Id::unique((salt, "resize_press_at"));
+    let now = ui.input(|input| input.time);
+    if ui.input(|input| input.pointer.any_pressed()) {
+        ui.data_mut(|data| data.insert_temp(press_id, now));
+    } else if !ui.input(|input| input.pointer.any_down()) {
+        ui.data_mut(|data| data.remove::<f64>(press_id));
+    }
+    let held = ui
+        .data(|data| data.get_temp::<f64>(press_id))
+        .map_or(0.0, |start| now - start);
+    let armed = !touch || held >= RESIZE_LONG_PRESS;
+
+    let idle = ui.visuals().widgets.noninteractive.bg_stroke;
+    let hot = ui.visuals().widgets.active.bg_stroke;
+    let widths_id = egui::Id::unique((salt, "widths"));
+    let mut active = None;
+    for (index, spec) in specs.iter().enumerate() {
+        let center = edges.get(index).copied().unwrap_or_default() + spacing * 0.5;
+        if !resizable(spec.column) {
+            continue;
+        }
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(center - grab, top),
+            egui::pos2(center + grab, band_bottom),
+        );
+        let response = ui.interact(
+            rect,
+            ui.make_persistent_id((salt, "resize", index)),
+            Sense::click_and_drag(),
+        );
+        if response.hovered() {
+            ui.set_cursor_icon(egui::CursorIcon::ResizeColumn);
+        }
+        let dragging = response.dragged() && armed;
+        if dragging {
+            active = Some(index);
+            let delta = ui.input(|input| input.pointer.delta()).x;
+            if delta != 0.0 {
+                widths[index] = (widths[index] + delta).max(spec.min);
+                ui.data_mut(|data| data.insert_temp(widths_id, widths.to_vec()));
+            }
+        }
+        if response.is_pointer_button_down_on() && armed {
+            active = Some(index);
+        }
+        if response.double_clicked() {
+            ui.data_mut(|data| data.remove::<Vec<f32>>(widths_id));
+        }
+        let stroke = if dragging {
+            egui::Stroke::new(hot.width.max(2.0), theme::accent(ui))
+        } else if response.hovered() || response.is_pointer_button_down_on() {
+            hot
+        } else {
+            idle
+        };
+        // 平时分隔线只画在表头这一段（就是拖动的把手）；拖动中的那一列才恢复
+        // 贯穿整个表格的强调色竖线，方便看清自己正在调哪一列的宽度。
+        let line_end = if dragging { line_bottom } else { band_bottom };
+        ui.painter().line_segment(
+            [egui::pos2(center, top), egui::pos2(center, line_end)],
+            stroke,
+        );
+    }
+    ui.data_mut(|data| {
+        data.insert_temp(egui::Id::unique((salt, "resize_active")), active);
+    });
+}
+
+/// 表格的可视宽度。只在窗口 / 面板尺寸变化时变，滚动条、列宽拖动的变化不算。
+fn column_viewport(ui: &Ui) -> i32 {
+    (ui.clip_rect().width() * 2.0).round() as i32
+}
+
+/// 列宽由 `TableBuilder` 按 `id_salt` 记着，窗口变宽变窄时不会自己重新分配；
+/// 这里按「可视宽度」记一笔，变了就返回 `true`，让调用方 `reset()` 重新自适应。
+///
+/// 判据不用内容宽度：拖动列宽或出现滚动条都会改变内容宽度，那会把用户刚拖好的
+/// 列宽又重置掉。
+fn column_layout_changed(ui: &Ui, salt: &str) -> bool {
+    let viewport = column_viewport(ui);
+    let id = egui::Id::unique(("table_viewport", salt));
+    let changed = ui.data(|data| data.get_temp::<i32>(id)) != Some(viewport);
+    if changed {
+        ui.data_mut(|data| data.insert_temp(id, viewport));
+    }
+    changed
+}
+
+/// 只查询「这一帧会不会重置列宽」，不写回。
+///
+/// 窄屏整页要先知道结果，再决定内容宽度：重置帧要用按视口算出的自然宽度，
+/// 不然会把上一轮拖宽的表宽又带进新窗口。
+fn column_layout_stale(ui: &Ui, salt: &str) -> bool {
+    let id = egui::Id::unique(("table_viewport", salt));
+    ui.data(|data| data.get_temp::<i32>(id)) != Some(column_viewport(ui))
+}
+
+/// 记下停站表实际铺开的宽度。
+///
+/// 窄屏整页只有一个两向滚动区，内容宽度由表宽决定；不跟着记的话，把列拖宽后
+/// 表格右边会被页面裁掉。
+fn remember_table_width(ui: &Ui, salt: &str, width: f32) {
+    ui.data_mut(|data| data.insert_temp(egui::Id::unique(("table_width", salt)), width));
+}
+
+fn remembered_table_width(ui: &Ui, salt: &str) -> Option<f32> {
+    ui.data(|data| data.get_temp::<f32>(egui::Id::unique(("table_width", salt))))
+}
+
 /// 表头格：`spec.right` 决定右对齐（数字列表头也跟着靠右）。
-fn column_head<C>(ui: &mut Ui, spec: &columns::Spec<C>) {
-    if spec.right {
+fn column_head<C>(ui: &mut Ui, spec: &columns::Spec<C>, hot: bool) {
+    if hot {
+        // 正在调宽的那一列：表头加粗 + 强调色，告诉手指改的是哪一列。
+        let text = bold(spec.head)
+            .size(theme::FONT_META)
+            .color(theme::accent(ui));
+        if spec.right {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(text);
+            });
+        } else {
+            ui.label(text);
+        }
+    } else if spec.right {
         table_head_right(ui, spec.head);
     } else {
         table_head(ui, spec.head);

@@ -47,12 +47,15 @@
 
 ## 平台差异（Android）
 
-- 平台差异只有**一个入口**：`gui/src/lib.rs` 的 `Platform { insets, ime, pointer }`。
-  桌面用 `Platform::desktop()`，Android 在 `android/src/lib.rs` 里组装。以后再加平台
-  能力（剪贴板、返回键）往这个结构体加字段，不要往 `run_with` / `LltApp::new` 加参数。
+- 平台差异只有**一个入口**：`gui/src/lib.rs` 的 `Platform`（`insets` / `ime` / `pointer` /
+  `bars` / `dirs` / `files` / `control` / `font_dirs`）。桌面用 `Platform::desktop()`，
+  Android 在 `android/src/lib.rs` 里组装。以后再加平台能力（剪贴板、返回键）往这个结构体
+  加字段，不要往 `run_with` / `LltApp::new` 加参数。
 - 具体差异三件：**系统栏安全区**（`ScreenInsets`，根 `Ui` 已经缩进，新建模态/弹窗时要用
   `safe_screen()` 而不是 `ctx.content_rect()`）、**软键盘**（高度算进 bottom 缩进）、
   **没有鼠标悬停**（悬停才出现的信息不能是唯一入口，现有悬停提示都是补充说明）。
+  另外 **系统栏图标颜色**跟着主题走（`Platform::bars`，见 `sync_system_bars`）：
+  浅色主题下不改就是白图标白底，状态栏的时间/信号全看不见。
 - **不要用 `cfg(target_os = "android")` 在界面里分叉**；需要平台信息就走 `Platform`。
 - **尺寸随指针类型取值**：`theme::control_height()` / `list_row_height()` /
   `detail_row_height()` / `link_hot_pad()` / `scroll_bar_width()`。鼠标 30/28/26、
@@ -60,6 +63,17 @@
 - **触摸屏的详情是整页**（`detail_page_ui` 直接复用竖排分支，不要改成 `Modal`：模态按内容
   自动长高，会和「按行取整」的停站表互相喂，长按页面会一路往上跑）。触摸屏同时关掉
   `interaction.selectable_labels`，否则表格里每个 Label 都带 click sense，把点行手势吃掉。
+- **手机整页详情只有一个两向 `ScrollArea`**（`detail_page_scroll`）：纵向滚整页，横向滚
+  停站表溢出的列。别再给表格套一层横向 `ScrollArea`——内层会把手指拖动整段吃掉，
+  按在表格上页面就不动了。杂项（用时 / 交路 / 日历）画在一个摆回视口左沿的子 `Ui` 里，
+  宽度固定为视口宽，所以表格右溢出既不撑宽杂项、也不会带着它们横滚。
+- **详情的入口（经由 / 开行计划）走同一条 `entry_bar_ui`**：一条上细线 + 一行格子 +
+  一条下细线，格子自己只管标题/摘要/尾部「查看 ▸」。不要再手写行（以前三份手写：
+  `via_header_ui` / `via_page_trigger` / `run_plan_entry`，行高、箭头、细线各不同，
+  叠在一起就是双线加错位）。宽屏侧栏把两个入口并排一行（经由分剩下的宽度，开行计划
+  按 `entry_natural_width` 定宽）；窄屏和手机整页仍是一行一个。格子内部间距显式 `add_space`
+  给了，子 `Ui` 的 `item_spacing.x` 要置 0，否则会叠成两倍、定宽算不准就会挤成叠字。
+- **开行计划那格不写灰字摘要**：抬头下面已经写过开行区间，再挂一串「区间 · 月历」只是噪声。
 - **宽度阈值集中**在 `theme`：`WIDE_MIN_WIDTH`、`STACKED_DETAIL_MAX_WIDTH`、
   `INLINE_DATE_MIN_WIDTH`、`TRAIN_COLUMNS_MIN_WIDTH`、`STATION_COLUMNS_MIN_WIDTH`、
   `OD_COLUMNS_MIN_WIDTH`。新增响应式列时从这里取，不要写字面量。

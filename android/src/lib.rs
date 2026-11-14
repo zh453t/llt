@@ -6,6 +6,7 @@
 //! **APK 不内置数据库**（数据包 41 MB，随包发会让 APK 翻倍，而且版本很快过时）：
 //! 第一次启动时库不存在，界面会落在「数据」页引导用户下载或导入备份。
 
+mod bars;
 mod control;
 mod files;
 mod ime;
@@ -87,6 +88,8 @@ fn android_main(app: AndroidApp) {
 
     // 输入法桥：NativeActivity 没有 InputConnection，中文要自己接（见 `ime.rs`）。
     let ime = ime::attach(&app);
+    // 系统栏图标颜色：浅色主题下状态栏/导航栏要换成深色图标（见 `bars.rs`）。
+    let bars = bars::attach(&app);
     // 文件选择器：导入/导出备份要弹系统的 SAF（见 `files.rs` 与 MainActivity）。
     let picker = files::attach(&app);
 
@@ -102,6 +105,7 @@ fn android_main(app: AndroidApp) {
         },
         files: picker.map(|picker| picker as std::sync::Arc<dyn llt_gui::files::FilePicker>),
         control: Some(control::attach(&app)),
+        bars: Some(bars),
         font_dirs: font_dir.into_iter().collect(),
     };
 

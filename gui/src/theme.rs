@@ -116,6 +116,39 @@ pub fn list_header_height() -> f32 {
     }
 }
 
+/// 设置页「表格列」清单的行高：触摸时按手指放宽。
+pub fn column_row_height() -> f32 {
+    match pointer() {
+        Pointer::Mouse => 30.0,
+        Pointer::Touch => 44.0,
+    }
+}
+
+/// 设置页「表格列」清单里复选框的边长。
+pub fn checkbox_size() -> f32 {
+    match pointer() {
+        Pointer::Mouse => 16.0,
+        Pointer::Touch => 22.0,
+    }
+}
+
+/// 触摸屏「表格列」弹窗里的紧凑行高：比设置页的 44 点稍矮，一屏能多放几行；
+/// 手指仍然点得中（约 5.5 毫米）。
+pub fn popup_column_row_height() -> f32 {
+    match pointer() {
+        Pointer::Mouse => 28.0,
+        Pointer::Touch => 36.0,
+    }
+}
+
+/// 触摸屏「表格列」弹窗里的复选框边长。
+pub fn popup_checkbox_size() -> f32 {
+    match pointer() {
+        Pointer::Mouse => 15.0,
+        Pointer::Touch => 20.0,
+    }
+}
+
 /// 筛选 chip 的高度与内边距：比控件矮一档，一行能放更多个，也不至于点不中。
 pub fn chip_height() -> f32 {
     match pointer() {
@@ -168,6 +201,17 @@ pub fn scroll_bar_width() -> f32 {
     match pointer() {
         Pointer::Mouse => 5.0,
         Pointer::Touch => 6.0,
+    }
+}
+
+/// 表格列分隔线的命中范围（向两侧各扩多少点）。
+///
+/// 用在自绘的列宽拖动热区上：5 点鼠标够用，手指根本按不住，触摸时放宽到 16 点。
+/// 热区覆盖整根分隔线，但触摸端要长按一会儿才生效，滚动时轻扫不会改列宽。
+pub fn resize_grab_radius() -> f32 {
+    match pointer() {
+        Pointer::Mouse => 5.0,
+        Pointer::Touch => 16.0,
     }
 }
 
@@ -280,6 +324,15 @@ pub fn primary_fill(ui: &egui::Ui) -> Color32 {
 /// 主按钮文字色。
 pub fn primary_text() -> Color32 {
     Color32::from_rgb(0xf7, 0xf9, 0xfc)
+}
+
+/// 强调色底上的前景色（勾选标记）：深色主题的强调色偏亮，配深色更清楚。
+pub fn on_accent_text(ui: &egui::Ui) -> Color32 {
+    if ui.visuals().dark_mode {
+        ui.visuals().extreme_bg_color
+    } else {
+        primary_text()
+    }
 }
 
 /// 浅色 / 深色两套配色，其余字段沿用 egui 默认值。

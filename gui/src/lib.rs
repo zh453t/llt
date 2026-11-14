@@ -129,11 +129,22 @@ pub trait AppControl: Send + Sync {
     fn exit(&self);
 }
 
+/// 系统栏（状态栏 / 导航栏）的图标颜色。
+///
+/// Android 的窗口是 edge-to-edge 的：状态栏和导航栏的图标直接画在界面上面，深浅由系统
+/// 决定。深色主题下系统默认的白色图标正好；浅色主题下不改就是白字白底，状态栏上的
+/// 时间、信号、电量全部看不见（实测）。界面每帧把「当前是不是浅色」报一次，只在真的变了
+/// 的时候过桥。桌面没有系统栏，传 `None`。
+pub trait SystemBars: Send + Sync {
+    /// `light = true`：界面是浅色，系统栏图标要画成深色。
+    fn set_light(&self, light: bool);
+}
+
 /// 平台差异的唯一入口：界面只认这个结构体，不再各自传参。
 ///
 /// 桌面与 Android 的差别全在这里：系统栏缩进、系统输入法、指针类型、数据目录、
-/// 文件选择器。以后再加平台能力（剪贴板、返回键）加字段即可，`run_with` 与
-/// `LltApp::new` 不必再改签名。
+/// 文件选择器、系统栏图标颜色、返回键。以后再加平台能力（剪贴板等）加字段即可，
+/// `run_with` 与 `LltApp::new` 不必再改签名。
 pub struct Platform {
     /// 系统栏（状态栏 / 导航栏 / 刘海 / 软键盘）占的像素；桌面恒为 0。
     pub insets: Insets,
@@ -147,6 +158,8 @@ pub struct Platform {
     pub files: Option<Arc<dyn files::FilePicker>>,
     /// 返回键 / 退出应用；桌面是 `None`。
     pub control: Option<Arc<dyn AppControl>>,
+    /// 系统栏图标颜色；桌面是 `None`（没有状态栏）。
+    pub bars: Option<Arc<dyn SystemBars>>,
     /// 额外字体目录（Android 把内置的中文粗体解到应用目录，放这里；桌面为空）。
     pub font_dirs: Vec<PathBuf>,
 }
@@ -169,6 +182,7 @@ impl Platform {
             dirs: data::DataDirs::beside_exe(),
             files: None,
             control: None,
+            bars: None,
             font_dirs: Vec::new(),
         }
     }

@@ -5,8 +5,12 @@ import android.app.NativeActivity;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
+import android.view.View;
+import android.view.Window;
+import android.view.WindowInsetsController;
 import android.view.WindowManager;
 
 import java.io.File;
@@ -39,6 +43,8 @@ public final class MainActivity extends NativeActivity {
     /** 导出：要拷出去的源文件与建议文件名。 */
     private String pendingExportSource;
     private String pendingExportName;
+    /** 系统栏图标要不要画成深色（浅色主题）；回到前台时按它重新贴一遍。 */
+    private boolean lightSystemBars;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -54,6 +60,57 @@ public final class MainActivity extends NativeActivity {
     }
 
     // —— Rust 调过来的入口（后台线程 → 这里 post 到 UI 线程） ——
+
+    /**
+     * 系统栏图标颜色：{@code light=true} 表示界面是浅色，图标要画成深色。
+     *
+     * <p>窗口是 edge-to-edge 的，状态栏/导航栏直接盖在界面上，那两条栏没有背景色可设，
+     * 只剩图标深浅：深色主题下系统默认的白正好，浅色主题下不改就是白字白底。
+     * 状态栏、导航栏一起改——底部的手势条／三键同样是画在浅色界面上的。
+     *
+     * <p>Rust 侧（{@code android/src/bars.rs}）只在主题真的变了时才调，这里再切到
+     * UI 线程（系统栏只能在 UI 线程动）。
+     */
+    public void setLightSystemBars(final boolean light) {
+        runOnUiThread(() -> applyLightSystemBars(light));
+    }
+
+    private void applyLightSystemBars(boolean light) {
+        lightSystemBars = light;
+        Window window = getWindow();
+        if (window == null) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            WindowInsetsController controller = window.getInsetsController();
+            if (controller == null) {
+                return;
+            }
+            int mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                    | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+            controller.setSystemBarsAppearance(light ? mask : 0, mask);
+            return;
+        }
+        // API 30 以前没有 insetsController：退回到 decorView 上的 systemUiVisibility。
+        // minSdk 是 26，两个 LIGHT_* 标志都有（导航栏那个正好从 26 起）。
+        View decor = window.getDecorView();
+        int flags = decor.getSystemUiVisibility();
+        int want = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+                | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+        decor.setSystemUiVisibility(light ? (flags | want) : (flags & ~want));
+    }
+
+    /**
+     * 回到前台时按记住的颜色重贴一遍。
+     *
+     * <p>系统在息屏、任务切换、系统界面重启之后不保证保留外观标志（实测浅色主题下
+     * 从后台回来图标又变白），重贴一次很便宜。
+     */
+    @Override
+    protected void onResume() {
+        super.onResume();
+        applyLightSystemBars(lightSystemBars);
+    }
 
     /** 弹系统选择器挑一份备份，选中后拷进 {@code destDir}。 */
     public void requestImportBackup(final String destDir) {

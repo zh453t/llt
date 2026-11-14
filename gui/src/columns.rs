@@ -4,9 +4,9 @@
 //! 配置里存的是列名（`status` / `code` / `from` …，见 [`key`]），这里负责
 //! 字符串 ↔ 枚举、表头文案，以及这一列的自然宽度；渲染在 `app.rs`。
 //!
-//! 宽度是「窄屏用的自然宽度」：手机上按它固定下来、横向滚动；窗口更宽时，
-//! `grow > 0` 的列（站名、区段这类文本）分掉多余空间，时刻/数字列保持不变，
-//! 这样上下两行的时刻才能对齐着比。
+//! 宽度是「窄屏用的自然宽度」：表格按它排初始列宽，窗口更宽时 `grow > 0` 的列
+//! （站名、区段这类文本）分掉多余空间，时刻/数字列保持不变，这样上下两行的时刻
+//! 才能对齐着比。用户还可以拖动列分隔线微调；除状态列外都可以拖。
 
 /// 站站结果表。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -126,7 +126,7 @@ impl OdColumn {
             Self::Duration => spec(self, "历时", false, 112.0, 104.0, 0),
             Self::Km => spec(self, "里程", true, 82.0, 74.0, 0),
             Self::Kind => spec(self, "类型", false, 88.0, 80.0, 0),
-            Self::Segment => spec(self, "区段", false, 110.0, 100.0, 1),
+            Self::Segment => spec(self, "区段", false, 150.0, 100.0, 1),
             Self::Date => spec(self, "开行日期", false, 168.0, 150.0, 0),
         }
     }
@@ -149,6 +149,11 @@ impl OdColumn {
 
     pub fn from_key(key: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|c| c.key() == key)
+    }
+
+    /// 状态列只有状态点，拖宽只会留白；其余列都可以拖动分隔线调整。
+    pub fn resizable(self) -> bool {
+        !matches!(self, Self::Status)
     }
 
     /// 按宽度自动挑列（用户没自定义时用）：窄屏留六列基本盘，宽了再加详情。
@@ -211,6 +216,11 @@ impl TrainColumn {
         Self::ALL.iter().copied().find(|c| c.key() == key)
     }
 
+    /// 状态列只有状态点，拖宽只会留白；其余列都可以拖动分隔线调整。
+    pub fn resizable(self) -> bool {
+        !matches!(self, Self::Status)
+    }
+
     pub fn auto(width: f32) -> Vec<Self> {
         let mut columns = vec![Self::Status, Self::Code, Self::Route];
         if width >= 760.0 {
@@ -270,6 +280,11 @@ impl StationColumn {
 
     pub fn from_key(key: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|c| c.key() == key)
+    }
+
+    /// 状态列只有状态点，拖宽只会留白；其余列都可以拖动分隔线调整。
+    pub fn resizable(self) -> bool {
+        !matches!(self, Self::Status)
     }
 
     /// 自动列：`show_station` = 一屏里可能有多个车站（同城多选），这时才要「车站」列。
@@ -335,6 +350,20 @@ impl StopColumn {
         Self::ALL.iter().copied().find(|c| c.key() == key)
     }
 
+    /// 停站表没有状态列：所有列都可以拖动分隔线调整。
+    pub fn resizable(self) -> bool {
+        matches!(
+            self,
+            Self::Station
+                | Self::Arrive
+                | Self::Depart
+                | Self::Dwell
+                | Self::Km
+                | Self::Day
+                | Self::Speed
+        )
+    }
+
     pub fn auto(width: f32) -> Vec<Self> {
         let mut columns = vec![Self::Station, Self::Arrive, Self::Depart];
         if width >= 380.0 {
@@ -346,18 +375,20 @@ impl StopColumn {
 }
 
 /// 把配置里的字符串列表解析成列：认不出的键直接丢掉（手改配置写错一个词，
-/// 不该让整份配置回退默认），去重后按 [`ALL`] 的声明顺序排。
-pub fn parse<C: Copy + PartialEq>(
-    keys: &[String],
-    from_key: fn(&str) -> Option<C>,
-    all: &[C],
-) -> Vec<C> {
-    let mut picked: Vec<C> = keys.iter().filter_map(|key| from_key(key)).collect();
-    picked.dedup();
-    all.iter()
-        .copied()
-        .filter(|column| picked.iter().any(|other| other == column))
-        .collect()
+/// 不该让整份配置回退默认），按配置里的顺序保留、重复的只留第一次出现的。
+///
+/// 顺序就是显示顺序：设置页里拖动调整列序后写回配置，下次启动照这个顺序排。
+/// [`ALL`] 只用来给「自动」和候选列表兜底，不再强制排序。
+pub fn parse<C: Copy + PartialEq>(keys: &[String], from_key: fn(&str) -> Option<C>) -> Vec<C> {
+    let mut picked: Vec<C> = Vec::new();
+    for key in keys {
+        if let Some(column) = from_key(key) {
+            if !picked.contains(&column) {
+                picked.push(column);
+            }
+        }
+    }
+    picked
 }
 
 /// 把列写回配置用的字符串列表。
@@ -394,15 +425,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_drops_unknown_and_sort_by_declaration() {
+    fn parse_drops_unknown_and_keeps_config_order() {
         let keys = vec!["arrive".to_owned(), "nope".to_owned(), "status".to_owned()];
-        let parsed = parse(&keys, OdColumn::from_key, OdColumn::ALL);
-        assert_eq!(parsed, vec![OdColumn::Status, OdColumn::Arrive]);
+        let parsed = parse(&keys, OdColumn::from_key);
+        assert_eq!(parsed, vec![OdColumn::Arrive, OdColumn::Status]);
 
-        let keys = vec!["status".to_owned(), "status".to_owned()];
+        // 重复的只留第一次出现的位置。
+        let keys = vec!["status".to_owned(), "code".to_owned(), "status".to_owned()];
         assert_eq!(
-            parse(&keys, OdColumn::from_key, OdColumn::ALL),
-            vec![OdColumn::Status]
+            parse(&keys, OdColumn::from_key),
+            vec![OdColumn::Status, OdColumn::Code]
         );
     }
 
