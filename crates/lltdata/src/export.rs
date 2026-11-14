@@ -428,7 +428,7 @@ pub fn write_sqlite(path: &Path, data: &Dataset, extras: &Extras, meta: &Meta) -
         }
     }
 
-    if let Err(err) = fs::rename(&tmp, path) {
+    if let Err(err) = replace_file(&tmp, path) {
         let _ = fs::remove_file(&tmp);
         return Err(err).with_context(|| {
             format!(
@@ -438,6 +438,33 @@ pub fn write_sqlite(path: &Path, data: &Dataset, extras: &Extras, meta: &Meta) -
         });
     }
     Ok(())
+}
+
+/// 原子替换文件。
+///
+/// Windows 上目标库刚被 SQLite 关闭时，句柄释放可能比 UI 那一帧慢一点点；
+/// 这里对「拒绝访问 / 共享冲突」重试约 1 秒，避免下载完成后仍报 os error 5。
+pub fn replace_file(tmp: &Path, target: &Path) -> std::io::Result<()> {
+    let mut last = None;
+    for _ in 0..20 {
+        match fs::rename(tmp, target) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                let retry = matches!(
+                    err.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Other
+                );
+                if !retry {
+                    return Err(err);
+                }
+                last = Some(err);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        std::io::Error::other(format!("无法替换 {}", target.display()))
+    }))
 }
 
 fn write_sqlite_at(path: &Path, data: &Dataset, extras: &Extras, meta: &Meta) -> Result<()> {
