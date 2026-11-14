@@ -1,6 +1,6 @@
 //! egui 界面：车次 / 车站 / 站站三种查询。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -12,7 +12,7 @@ use jiff::civil::Date;
 use crate::config::Tab;
 use crate::{columns, config, fonts, theme};
 use lltdb::date::{date_window, date_ymd, origin_ymd, today, weekday_cn, ymd};
-use lltdb::extras::{DiningCar, Duty, ViaPoint};
+use lltdb::extras::{DiningCar, Duty, DutySegment, ViaPoint};
 use lltdb::{Db, OdResult, StationStop, Stop, TrainDetail, TrainSummary};
 
 const OD_RESULT_LIMIT: usize = 500;
@@ -148,6 +148,21 @@ struct TrainExtras {
     duties: Vec<Duty>,
     via: Vec<ViaPoint>,
     dining: Vec<DiningCar>,
+    /// 交路明细：`(交路 id, 段序号)` → 该段车次当天首末站的时刻。查不到就没有这个键。
+    ///
+    /// 选中车次时一次查完（`duty_runs`），界面每帧只查表——展开交路不能逐帧翻库。
+    runs: HashMap<(i64, i64), DutyRun>,
+}
+
+/// 交路里一段车次的首末站与时刻，展开「交路明细」时逐行显示。
+#[derive(Clone, Debug)]
+struct DutyRun {
+    from: String,
+    /// 首站发车时刻（`hh:mm`，数据里就是这个写法）。
+    from_time: String,
+    to: String,
+    /// 末站到达时刻。
+    to_time: String,
 }
 
 impl TrainExtras {
@@ -266,6 +281,11 @@ pub struct LltApp {
     inset_probe_at: Option<Instant>,
     /// 上一次报给平台的「系统栏图标是否要深色」（浅色主题）；`None` = 还没报过。
     bars_light: Option<bool>,
+    /// 详情页的身份：每打开一次车次就加一。
+    ///
+    /// 详情里的滚动区、停站表都把它拼进 `id_salt`，于是换车次就是一份全新的滚动状态——
+    /// 新打开的车次从页首开始，不会继承上一趟车翻到的位置。
+    detail_gen: u64,
 
     /// 配置文件路径：默认紧挨可执行文件，见 [`config::resolve`]。
     config_path: PathBuf,
@@ -375,6 +395,7 @@ impl LltApp {
             platform,
             safe_area: crate::ScreenInsets::default(),
             inset_probe_at: None,
+            detail_gen: 0,
             bars_light: None,
             config_path,
             persisted: settings,
@@ -878,10 +899,13 @@ impl LltApp {
         self.via_page_open = false;
         self.via_page_size = None;
         self.error = None;
+        // 新页面从头开始：详情里的滚动区按 `detail_gen` 换 id，上一趟车的滚动位置不继承。
+        self.detail_gen = self.detail_gen.wrapping_add(1);
 
         let mut error = None;
         let mut detail = None;
         let mut extras = TrainExtras::default();
+        let date = ymd(self.dates.get(self.tab));
         if let Some(db) = &self.db {
             match db.train_detail(index) {
                 Ok(d) => detail = Some(d),
@@ -891,6 +915,7 @@ impl LltApp {
             extras.duties = db.duties_for(index).unwrap_or_default();
             extras.via = db.via_points(index).unwrap_or_default();
             extras.dining = db.dining_cars(index).unwrap_or_default();
+            extras.runs = duty_runs(db, &extras.duties, date);
         }
         if let Some(err) = error {
             self.error = Some(err);
@@ -2068,7 +2093,7 @@ impl LltApp {
             // 它们撑宽，横滚时也不跟着左右跑（见下面的 `extras_left`）。
             let page_left = ui.available_rect_before_wrap().left();
             egui::ScrollArea::both()
-                .id_salt("detail_page_scroll")
+                .id_salt(("detail_page_scroll", self.detail_gen))
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     // 滚动区内容带一圈 `content_margin`，表格和杂项都从这里起算。
@@ -2164,7 +2189,7 @@ impl LltApp {
                     let stops_height = (total - trigger_height).max(80.0);
                     let picked = scrollable_table(
                         ui,
-                        "train_stops_page",
+                        ("train_stops_page", self.detail_gen),
                         stops_height,
                         theme::detail_header_height(),
                         |ui, content_width| {
@@ -2268,7 +2293,7 @@ impl LltApp {
                 let height = ui.available_height();
                 let picked = scrollable_table(
                     ui,
-                    "train_stops_side",
+                    ("train_stops_side", self.detail_gen),
                     height,
                     theme::detail_header_height(),
                     |ui, content_width| {
@@ -2313,6 +2338,7 @@ impl LltApp {
                 &mut self.plan_month,
                 &mut plan_page_open,
                 screen,
+                date,
             );
         }
         self.plan_page_open = plan_page_open;
@@ -2421,22 +2447,10 @@ impl LltApp {
         let Some(db) = &self.db else {
             return;
         };
-        let query = normalize_code(code);
         let date = ymd(self.dates.get(self.tab));
-        match db.search_trains(&query, None) {
-            Ok(hits) => match hits
-                .iter()
-                .find(|train| train.runs_on(date))
-                .or(hits.first())
-            {
-                Some(train) => {
-                    let index = train.index;
-                    self.select_train(index);
-                }
-                None => {
-                    self.error = Some(format!("交路里的车次 {code} 在数据里查不到"));
-                }
-            },
+        match find_train(db, code, date) {
+            Ok(Some(index)) => self.select_train(index),
+            Ok(None) => self.error = Some(format!("交路里的车次 {code} 在数据里查不到")),
             Err(err) => self.error = Some(format!("查询车次失败：{err}")),
         }
     }
@@ -3343,6 +3357,51 @@ fn normalize_code(input: &str) -> String {
         .collect()
 }
 
+/// 按车次号找一趟车，返回 `trains` 表主键。
+///
+/// 同号多区间（同一车次号有多个开行区间）时优先取「当天在开」的那条，否则取第一条——
+/// 交路跳转与交路明细里的站名时刻用的是同一口径。
+fn find_train(db: &Db, code: &str, date: i64) -> rusqlite::Result<Option<i64>> {
+    let query = normalize_code(code);
+    let hits = db.search_trains(&query, None)?;
+    Ok(hits
+        .iter()
+        .find(|train| train.runs_on(date))
+        .or(hits.first())
+        .map(|train| train.index))
+}
+
+/// 交路明细要用的「每段车次：出发站/时刻 → 到达站/时刻」。
+///
+/// 选中车次时一次查完（每段两个轻查），查不到的那段不放进 map——展开后
+/// 那一行就只写车次号（回送 / 检测车、旧库缺数据都是这种情况）。
+fn duty_runs(db: &Db, duties: &[Duty], date: i64) -> HashMap<(i64, i64), DutyRun> {
+    let mut runs = HashMap::new();
+    for duty in duties {
+        for segment in &duty.segments {
+            let Ok(Some(index)) = find_train(db, &segment.code, date) else {
+                continue;
+            };
+            let Ok(detail) = db.train_detail(index) else {
+                continue;
+            };
+            let (Some(first), Some(last)) = (detail.stops.first(), detail.stops.last()) else {
+                continue;
+            };
+            runs.insert(
+                (duty.id, segment.seq),
+                DutyRun {
+                    from: first.station.clone(),
+                    from_time: first.depart.clone(),
+                    to: last.station.clone(),
+                    to_time: last.arrive.clone(),
+                },
+            );
+        }
+    }
+    runs
+}
+
 /// 站名只做全角转半角并去掉首尾空白，中文本身不改动。
 fn normalize_station(input: &str) -> String {
     normalize_width(input).trim().to_owned()
@@ -3763,7 +3822,36 @@ fn detail_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
     });
 }
 
-/// 交路串：`G1806/7 → G82/79 → [G1] · 2026-06-13 起`，当前车次高亮。
+/// 交路串里的一个车次号：当前车次加粗高亮、查得到的画成链接、其余弱化。
+///
+/// 交路串和展开后的明细框共用这一个画法，「点击→跳转」由调用方处理。
+fn duty_segment_ui(ui: &mut Ui, segment: &DutySegment) -> Option<String> {
+    let text = RichText::new(&segment.label).size(theme::FONT_BODY);
+    if segment.current {
+        ui.label(
+            text.family(fonts::bold_family())
+                .background_color(ui.visuals().selection.bg_fill),
+        )
+        .on_hover_text("当前车次");
+        None
+    } else if jumpable_train_code(&segment.code) {
+        // `override_text_color` 会盖掉 `Link` 的回退色，这里显式指定，
+        // 保证和停站表里的车站链接是同一支深蓝；悬停时 Link 自己加下划线。
+        let text = text.color(ui.visuals().hyperlink_color);
+        let clicked = ui
+            .add(egui::Link::new(text))
+            .on_hover_text(format!("查看 {} 的时刻表", segment.label))
+            .clicked();
+        clicked.then(|| segment.code.clone())
+    } else {
+        ui.label(text.weak())
+            .on_hover_text("回送 / 检测车次，没有独立时刻表");
+        None
+    }
+}
+
+/// 交路串：`G1806/7 → G82/79 → [G1]`，当前车次高亮
+///（有效区间不写在这里了：展开后写在明细框的尾部）。
 ///
 /// 除当前车次外，其它车次都可以点过去（`0` 开头的回送车与 `DJ` 检测车除外），
 /// 返回被点中的段首车次号。
@@ -3774,7 +3862,6 @@ fn duty_chain_ui(ui: &mut Ui, duty: &Duty, extra_duties: bool, index: usize) -> 
         ui.spacing_mut().interact_size.y = 22.0;
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP_XS;
-            let highlight = ui.visuals().selection.bg_fill;
             if extra_duties {
                 ui.label(meta(format!("{}.", index + 1)).weak());
             }
@@ -3782,44 +3869,108 @@ fn duty_chain_ui(ui: &mut Ui, duty: &Duty, extra_duties: bool, index: usize) -> 
                 if position > 0 {
                     ui.label(RichText::new("→").size(theme::FONT_BODY).weak());
                 }
-                let text = RichText::new(&segment.label).size(theme::FONT_BODY);
-                if segment.current {
-                    ui.label(
-                        text.family(fonts::bold_family())
-                            .background_color(highlight),
-                    )
-                    .on_hover_text("当前车次");
-                } else if jumpable_train_code(&segment.code) {
-                    // `override_text_color` 会盖掉 `Link` 的回退色，这里显式指定，
-                    // 保证和停站表里的车站链接是同一支深蓝；悬停时 Link 自己加下划线。
-                    let text = text.color(ui.visuals().hyperlink_color);
-                    if ui
-                        .add(egui::Link::new(text))
-                        .on_hover_text(format!("查看 {} 的时刻表", segment.label))
-                        .clicked()
-                    {
-                        clicked = Some(segment.code.clone());
-                    }
-                } else {
-                    ui.label(text.weak())
-                        .on_hover_text("回送 / 检测车次，没有独立时刻表");
+                if let Some(code) = duty_segment_ui(ui, segment) {
+                    clicked = Some(code);
                 }
             }
-            // 分隔符和日期作为一个整体换行，避免行末只剩一个「·」。
-            ui.add(
-                egui::Label::new(
-                    meta(format!("· {}", date_window(duty.start_date, duty.end_date))).weak(),
-                )
-                .wrap_mode(egui::TextWrapMode::Extend),
+        });
+    });
+    clicked
+}
+
+/// 「交路明细」展开状态按车次保存：换车次就回到收起，不留上次的展开。
+fn duty_fold_id(train_index: i64) -> egui::Id {
+    egui::Id::unique(("llt-duty-fold", train_index))
+}
+
+/// 交路明细框：圆角描边的一段长方形，一行一段车次，尾部写交路有效期。
+///
+/// 每行是「车次号 +（出发站 出发时刻 → 到达站 到达时刻）」；车次号的可点性、
+/// 当前车次高亮都与交路串一致，查不到那趟车时只写车次号。框撑满内容列宽宽，
+/// 四周内边距一样。
+fn duty_box_ui(
+    ui: &mut Ui,
+    duties: &[&Duty],
+    runs: &HashMap<(i64, i64), DutyRun>,
+    multiple: bool,
+    link: &mut Option<DetailLink>,
+) {
+    let frame = egui::Frame::new()
+        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::same(theme::GAP_S as i8));
+    frame.show(ui, |ui| {
+        // 框要撑满父容器，而 `Frame` 默认按内容收缩。
+        ui.set_min_width(ui.available_width());
+        // 一行一段车次，就一行字的高度——不然每一行都会被抬到控件高度（触摸屏 44 点）。
+        ui.spacing_mut().interact_size.y = 20.0;
+        for (index, duty) in duties.iter().enumerate() {
+            if index > 0 {
+                ui.add_space(theme::GAP_S);
+            }
+            for (position, segment) in duty.segments.iter().enumerate() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = theme::GAP_XS;
+                    // 同号多区间时标出序号，与交路串上的序号对得上。
+                    if multiple && position == 0 {
+                        ui.label(meta(format!("{}.", index + 1)).weak());
+                    }
+                    if let Some(code) = duty_segment_ui(ui, segment) {
+                        *link = Some(DetailLink::Train(code));
+                    }
+                    if let Some(run) = runs.get(&(duty.id, segment.seq)) {
+                        ui.label(
+                            meta(format!(
+                                "({} {} → {} {})",
+                                run.from, run.from_time, run.to, run.to_time
+                            ))
+                            .weak(),
+                        )
+                        .on_hover_text(format!(
+                            "{} {} 开，{} {} 到（按查询当天的数据）",
+                            run.from, run.from_time, run.to, run.to_time
+                        ));
+                    }
+                });
+            }
+            ui.label(
+                meta(format!(
+                    "有效期 {}",
+                    date_window(duty.start_date, duty.end_date)
+                ))
+                .weak(),
             )
             .on_hover_text(format!(
                 "该交路有效区间：{} ~ {}",
                 date_ymd(duty.start_date),
                 date_ymd(duty.end_date)
             ));
-        });
+        }
     });
-    clicked
+}
+
+/// 交路行的折叠三角按钮：18×18 的点击区，悬停有底色。
+fn duty_fold_button_ui(ui: &mut Ui, open: bool) -> bool {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), Sense::click());
+    let hovered = response.hovered();
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        ui.painter()
+            .rect_filled(rect, 4.0, ui.visuals().widgets.hovered.weak_bg_fill);
+    }
+    let color = if hovered {
+        ui.visuals().strong_text_color()
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    paint_collapse_arrow(ui, rect, open, color);
+    response
+        .on_hover_text(if open {
+            "收起交路明细"
+        } else {
+            "展开交路明细（每段车次的首末站与时刻）"
+        })
+        .clicked()
 }
 
 /// 把 `京包张包段/包西线` 拆成线路集合。
@@ -4024,6 +4175,11 @@ fn legend_item(ui: &mut Ui, color: Color32, label: &str, tip: &str) {
 /// 折叠标题的三角箭头（不依赖字体里的几何符号）。
 fn collapse_arrow(ui: &mut Ui, open: bool, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 18.0), Sense::hover());
+    paint_collapse_arrow(ui, rect, open, color);
+}
+
+/// 在 `rect` 里画折叠三角（`open` 朝下、否则朝右），不分配空间。
+fn paint_collapse_arrow(ui: &Ui, rect: egui::Rect, open: bool, color: Color32) {
     let center = rect.center();
     let radius = 3.5;
     let points = if open {
@@ -4289,17 +4445,38 @@ fn extras_ui(
 
     if !duties.is_empty() {
         let multiple = duties.len() > 1;
+        let fold_id = duty_fold_id(train.index);
+        let mut open = ui.data(|data| data.get_temp::<bool>(fold_id).unwrap_or(false));
         detail_row(ui, "交路", |ui| {
-            for (index, duty) in duties.iter().enumerate() {
-                if index > 0 {
-                    ui.add_space(theme::GAP_XS);
+            // 串占左边、折叠三角贴右：串换行时三角不动，不会被挤到下一行。
+            ui.horizontal_top(|ui| {
+                let chain_width = (ui.available_width() - 18.0 - theme::GAP_XS).max(0.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(chain_width, 0.0),
+                    Layout::top_down(Align::Min),
+                    |ui| {
+                        for (index, duty) in duties.iter().enumerate() {
+                            if index > 0 {
+                                ui.add_space(theme::GAP_XS);
+                            }
+                            // 同号多区间时标出序号，避免两条交路看起来像一条。
+                            if let Some(code) = duty_chain_ui(ui, duty, multiple, index) {
+                                *link = Some(DetailLink::Train(code));
+                            }
+                        }
+                    },
+                );
+                if duty_fold_button_ui(ui, open) {
+                    open = !open;
                 }
-                // 同号多区间时标出序号，避免两条交路看起来像一条。
-                if let Some(code) = duty_chain_ui(ui, duty, multiple, index) {
-                    *link = Some(DetailLink::Train(code));
-                }
+            });
+            // 展开后在交路行与车型之间插一个明细框（每一行一段车次）。
+            if open {
+                ui.add_space(theme::GAP_S);
+                duty_box_ui(ui, &duties, &extras.runs, multiple, link);
             }
         });
+        ui.data_mut(|data| data.insert_temp(fold_id, open));
     }
 
     // 车型：优先用交路里的编组（如 CR400BF-S型重联），没有就用车次类别。
@@ -4352,7 +4529,7 @@ fn extras_ui(
     // 窄窗口的底部面板没那么宽，入口就接在杂项后面。
     if theme::pointer() == theme::Pointer::Touch {
         ui.add_space(theme::GAP_S);
-        run_plan_ui(ui, train, plan, true);
+        run_plan_ui(ui, train, plan, true, date);
     } else if plan_entry {
         ui.add_space(theme::GAP_S);
         if run_plan_entry(ui) {
@@ -4369,6 +4546,7 @@ fn run_plan_page_ui(
     month: &mut i64,
     open: &mut bool,
     screen: egui::Vec2,
+    date: i64,
 ) {
     // 只约束宽度：日历是定高的，高度交给内容，免得弹窗下面拖一大片空白。
     let width = (screen.x - 24.0).min(340.0);
@@ -4400,7 +4578,7 @@ fn run_plan_page_ui(
                 });
             });
             ui.add_space(theme::GAP_S);
-            run_plan_ui(ui, train, &mut plan, false);
+            run_plan_ui(ui, train, &mut plan, false, date);
         });
     // 与详情整页同一个理由：打开它的那一下点击还没结束，模态背景层会当成
     // 「点了外面」，于是弹窗刚开就被关。这里只认自己的「关闭」按钮。
@@ -4435,14 +4613,23 @@ fn run_plan_entry(ui: &mut Ui) -> bool {
 /// 数据完全来自本地：`date_from`/`date_to` 两个日期 + `t.rule` 里的一行
 /// 「周期 / 掩码」（见 `docs/llt-format-reverse-engineering.md` §12）。
 /// 用 egui 自己的绘图与 jiff 的日期运算，不引第三方日历控件。
-fn run_plan_ui(ui: &mut Ui, train: &TrainSummary, plan: &mut RunPlan<'_>, with_title: bool) {
+/// 开行计划月历。
+///
+/// 月历的「当下」是**查询日期**（不是今天）：详情是按查询日期算开不开行的，
+/// 圈出的那一天、以及首次打开落在哪个月，都跟着查询日期走。
+fn run_plan_ui(
+    ui: &mut Ui,
+    train: &TrainSummary,
+    plan: &mut RunPlan<'_>,
+    with_title: bool,
+    date: i64,
+) {
     let (period, mask) = train
         .rule_index
         .and_then(|index| plan.rules.get(&index).copied())
         .unwrap_or((1, 0));
-    let this_month = ymd(today()) / 100;
     if *plan.month <= 0 {
-        *plan.month = this_month;
+        *plan.month = date / 100;
     }
 
     let cell = theme::plan_cell_size(ui.available_width());
@@ -4507,7 +4694,8 @@ fn run_plan_ui(ui: &mut Ui, train: &TrainSummary, plan: &mut RunPlan<'_>, with_t
     let days = i64::from(first.days_in_month());
     // 周一为第一列，与「工作日/周末」的直觉一致。
     let lead = i64::from(first.weekday().to_monday_zero_offset());
-    let today_ymd = ymd(today());
+    // 查询日期那格画一圈：这里是「查的哪天」，不是「今天」。
+    let query_ymd = date;
 
     let visuals = ui.visuals().clone();
     let running_fg = visuals.hyperlink_color;
@@ -4574,7 +4762,7 @@ fn run_plan_ui(ui: &mut Ui, train: &TrainSummary, plan: &mut RunPlan<'_>, with_t
                     font.clone(),
                     color,
                 );
-                if date == today_ymd {
+                if date == query_ymd {
                     painter.rect_stroke(
                         rect.shrink(1.0),
                         5.0,
@@ -4582,7 +4770,12 @@ fn run_plan_ui(ui: &mut Ui, train: &TrainSummary, plan: &mut RunPlan<'_>, with_t
                         egui::StrokeKind::Inside,
                     );
                 }
-                response.on_hover_text(format!("{} · {}", date_ymd(date), state.label()));
+                let note = if date == query_ymd {
+                    " · 查询日"
+                } else {
+                    ""
+                };
+                response.on_hover_text(format!("{} · {}{note}", date_ymd(date), state.label()));
             }
         });
     }
@@ -4593,6 +4786,7 @@ fn run_plan_ui(ui: &mut Ui, train: &TrainSummary, plan: &mut RunPlan<'_>, with_t
         legend_swatch(ui, SwatchKind::Filled, running_bg, running_fg, "开行");
         legend_swatch(ui, SwatchKind::Struck, weak_fg, weak_fg, "规则停开");
         legend_swatch(ui, SwatchKind::Plain, dim_fg, dim_fg, "区间外 / 已过期");
+        legend_swatch(ui, SwatchKind::Plain, running_fg, running_fg, "查询日");
     });
 }
 
@@ -5240,7 +5434,7 @@ fn candidates_popup(
 /// 滚动条，按它算列宽才不会因为多算 8 点而凭空多出一条横向滚动条。
 fn scrollable_table<R>(
     ui: &mut Ui,
-    salt: &str,
+    salt: impl std::hash::Hash + std::fmt::Debug,
     height: f32,
     header_height: f32,
     build: impl FnOnce(&mut Ui, f32) -> R,
