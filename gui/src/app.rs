@@ -1670,8 +1670,7 @@ impl LltApp {
         // 候选站下拉要贴在被编辑 / 没解析出来的那个输入框下面，所以留着两个 Response。
         let mut from_response = None;
         let mut to_response = None;
-        // 触摸屏上「模糊 / 查询」在底栏（`od_bar`），这里只留两个输入框与交换按钮。
-        let bar = self.bottom_bar();
+        // 触摸屏上「清空 / 计数」在底栏（`od_bar`），这里只留两个输入框与交换按钮。
         // 这一行不换行：出发 + ⇌ + 到达 必须并排（换行会让到达框单独掉到下一行）。
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP_S;
@@ -1727,19 +1726,6 @@ impl LltApp {
                 to.request_focus();
             }
             to_response = Some(to.clone());
-
-            if !bar {
-                // 边打边查，这个按钮只是兜底，别做成主操作。
-                let can_query = !self.od_from.trim().is_empty() && !self.od_to.trim().is_empty();
-                let button = egui::Button::new(meta("刷新"));
-                if ui
-                    .add_enabled(can_query, button)
-                    .on_hover_text("重新查询（输入变化时会自动刷新）")
-                    .clicked()
-                {
-                    changed = true;
-                }
-            }
         });
         ui.add_space(theme::GAP_XS);
         // 日期 + 「模糊站名」同一行：放在输入框下面、车站筛选上面（竖屏与侧栏都一样）。
@@ -2825,19 +2811,23 @@ impl LltApp {
         self.platform.pointer == theme::Pointer::Touch
     }
 
-    /// 当前页有没有动作可放：车次页在没输入时只有一行空栏，不如收起来。
+    /// 当前页有没有动作可放：没输入时底栏只剩一条空栏，不如收起来。
+    ///
+    /// 三个查询页的底栏都是「清空 + 开行统计」，输入为空时两样都没有。
     fn action_bar_needed(&self) -> bool {
         match self.tab {
             Tab::Data => false,
             Tab::Train => !self.train_query.trim().is_empty(),
-            _ => true,
+            Tab::Od => !self.od_from.trim().is_empty() || !self.od_to.trim().is_empty(),
+            Tab::Station => !self.station_query.trim().is_empty(),
         }
     }
 
     /// 底栏的动作行：把「不是输入框、又占表格上方空间」的控件收在这里。
     ///
-    /// 每个标签页只放当前这页用得上的：查询 / 清空 / 模糊，右侧是这一页的
-    /// 计数（原来那一行「当日开行 N 趟」）。数据页不需要动作行。
+    /// 三个查询页统一成同一行：左边「清空」，右跟这一页的开行统计
+    /// （`● 当日开行 ○ 当日不开行`，原来那一行「当日开行 N 趟」）。
+    /// 数据页不需要动作行。
     fn action_bar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP_S;
@@ -2850,29 +2840,31 @@ impl LltApp {
         });
     }
 
-    /// 站站的动作行：模糊 / 查询（「交换」在两个输入框中间，不在这里）。
+    /// 站站的动作行：清空 + 计数（和车次 / 车站两页同一个格式：左清空、右计数）。
     fn od_bar(&mut self, ui: &mut Ui) {
-        let mut changed = false;
-        let can_query = !self.od_from.trim().is_empty() && !self.od_to.trim().is_empty();
+        let height = theme::bar_height() - 8.0;
+        let has_query = !self.od_from.trim().is_empty() || !self.od_to.trim().is_empty();
+        if has_query
+            && ui
+                .add(egui::Button::new(meta("清空")).min_size(egui::vec2(0.0, height)))
+                .clicked()
+        {
+            self.clear_od();
+        }
         let (running, not_running) = self.running_split();
         let total = self.od_shown_count();
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            // 「刷新」只是兜底：三个查询页都边打边查，用户正常不会按它，
-            // 所以做成 chip 大小、次要样式，别抢视觉重心。
-            let button =
-                egui::Button::new(meta("刷新")).min_size(egui::vec2(48.0, theme::chip_height()));
-            if ui
-                .add_enabled(can_query, button)
-                .on_hover_text("重新查询（输入变化时会自动刷新）")
-                .clicked()
-            {
-                changed = true;
-            }
             counts_label(ui, total, running, not_running);
         });
-        if changed {
-            self.refresh_od();
-        }
+    }
+
+    /// 站站页的清空：两个站名都清掉、结果跟着空，焦点还给出发框。
+    fn clear_od(&mut self) {
+        self.od_from.clear();
+        self.od_to.clear();
+        self.od_last = OdField::From;
+        self.focus_request = Some(FocusField::OdFrom);
+        self.refresh_od();
     }
 
     /// 按车次的动作行：清空 + 计数。
