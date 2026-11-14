@@ -1329,9 +1329,11 @@ impl LltApp {
                     salt,
                     &specs,
                     &mut widths,
-                    &edges,
-                    first_row,
-                    theme::list_header_height(),
+                    TableGeometry {
+                        edges: &edges,
+                        first_row,
+                        header_height: theme::list_header_height(),
+                    },
                     Col::resizable,
                 );
             },
@@ -1644,9 +1646,11 @@ impl LltApp {
                     salt,
                     &specs,
                     &mut widths,
-                    &edges,
-                    first_row,
-                    theme::list_header_height(),
+                    TableGeometry {
+                        edges: &edges,
+                        first_row,
+                        header_height: theme::list_header_height(),
+                    },
                     Col::resizable,
                 );
             },
@@ -2036,9 +2040,11 @@ impl LltApp {
                     salt,
                     &specs,
                     &mut widths,
-                    &edges,
-                    first_row,
-                    theme::list_header_height(),
+                    TableGeometry {
+                        edges: &edges,
+                        first_row,
+                        header_height: theme::list_header_height(),
+                    },
                     Col::resizable,
                 );
             },
@@ -2077,6 +2083,9 @@ impl LltApp {
             rules: &self.rules,
             month: &mut self.plan_month,
             open: &mut plan_page_open,
+            // 默认由杂项自己画一行入口；宽屏侧栏把它挪到入口条里，见下面的
+            // `plan.entry = false`。
+            entry: true,
         };
         let open = format!(
             "开行 {}",
@@ -2161,7 +2170,6 @@ impl LltApp {
                             date,
                             &mut link,
                             &mut plan,
-                            true,
                         );
                     });
                 });
@@ -2195,7 +2203,6 @@ impl LltApp {
                                     date,
                                     &mut link,
                                     &mut plan,
-                                    true,
                                 );
                             });
                     },
@@ -2255,6 +2262,7 @@ impl LltApp {
             ui.separator();
             ui.add_space(theme::GAP_S);
             // 宽屏的开行计划入口在下面的入口条里，和经由同一行。
+            plan.entry = false;
             extras_ui(
                 ui,
                 &detail.summary,
@@ -2263,7 +2271,6 @@ impl LltApp {
                 date,
                 &mut link,
                 &mut plan,
-                false,
             );
             ui.add_space(theme::GAP_S);
             // 入口条：经由占剩下的宽度（它带一串摘要），开行计划按自身文字宽度。
@@ -3868,9 +3875,11 @@ fn stops_table_ui(
                 "train_stops",
                 &specs,
                 &mut widths,
-                &edges,
-                first_row,
-                theme::detail_header_height(),
+                TableGeometry {
+                    edges: &edges,
+                    first_row,
+                    header_height: theme::detail_header_height(),
+                },
                 Col::resizable,
             );
             paint_header_line(ui, header_top, theme::detail_header_height());
@@ -4495,6 +4504,9 @@ struct RunPlan<'a> {
     month: &'a mut i64,
     /// 桌面端点「开行计划」入口后置真，由详情页画弹窗。
     open: &'a mut bool,
+    /// 桌面：入口是否由 `extras_ui` 在尾上自己画一行。宽屏把它挪到下面的入口条
+    /// （和经由并排一行），那时传 `false`。
+    entry: bool,
 }
 
 fn extras_ui(
@@ -4505,9 +4517,6 @@ fn extras_ui(
     date: i64,
     link: &mut Option<DetailLink>,
     plan: &mut RunPlan<'_>,
-    // 桌面：开行计划是否由本函数在尾上画一行入口。宽屏把它挪到下面的入口条
-    // （和经由并排一行），那时传 `false`。
-    plan_entry: bool,
 ) {
     let (duties, dining, matched) = extras.for_date(date);
     ui.spacing_mut().item_spacing.y = 6.0;
@@ -4623,7 +4632,7 @@ fn extras_ui(
     if theme::pointer() == theme::Pointer::Touch {
         ui.add_space(theme::GAP_S);
         run_plan_ui(ui, train, plan, true, date);
-    } else if plan_entry {
+    } else if plan.entry {
         ui.add_space(theme::GAP_S);
         if run_plan_entry(ui) {
             *plan.open = true;
@@ -4654,6 +4663,7 @@ fn run_plan_page_ui(
         rules,
         month,
         open: &mut false,
+        entry: false,
     };
     let mut close = false;
     let _ = egui::Modal::new(egui::Id::unique(("llt-run-plan-page", size_key)))
@@ -5785,17 +5795,18 @@ fn table_header_drag<C: Copy>(
         // 只跟紧挨着的那一列换：越过它的中线才动手，原地小幅抖动不会误触发。
         let movable_at = |target: usize| specs.get(target).is_some_and(|spec| movable(spec.column));
         let mut target = None;
-        if let Some(next) = cells.get(index + 1) {
-            if pointer.x > next.center().x && movable_at(index + 1) {
-                target = Some(index + 1);
-            }
+        if let Some(next) = cells.get(index + 1)
+            && pointer.x > next.center().x
+            && movable_at(index + 1)
+        {
+            target = Some(index + 1);
         }
-        if target.is_none() {
-            if let Some(previous) = index.checked_sub(1) {
-                if pointer.x < cells[previous].center().x && movable_at(previous) {
-                    target = Some(previous);
-                }
-            }
+        if target.is_none()
+            && let Some(previous) = index.checked_sub(1)
+            && pointer.x < cells[previous].center().x
+            && movable_at(previous)
+        {
+            target = Some(previous);
         }
         if let Some(target) = target {
             let mut order: Vec<String> = specs
@@ -5886,6 +5897,18 @@ struct ResizeAnchor {
 
 /// 列分隔线的拖动调整。
 ///
+/// 拖列宽要用到的表格几何：表头各列右边界、首行矩形、表头高度。
+///
+/// 打包成一个结构体只是为了让 `table_resize_handles` 的参数别太长（clippy 的
+/// `too_many_arguments`），三者本来就是一整套、总是一起传。
+struct TableGeometry<'a> {
+    /// 表头里每一列右边界（含分隔线位置）。
+    edges: &'a [f32],
+    /// 第一行数据的位置；还没有行时是 `None`（那就无处可拖）。
+    first_row: Option<egui::Rect>,
+    header_height: f32,
+}
+
 /// 触摸屏上只在**表头**那一条横带里认分隔线，而且要先按住约 [`RESIZE_LONG_PRESS`]
 /// 秒才进入调整：手指从行上开始拖动是滚动，不能因为擦到列边就把列宽改了。
 /// 鼠标没有长按限制，整根分隔线都能拖。
@@ -5896,14 +5919,13 @@ fn table_resize_handles<C: Copy>(
     salt: &str,
     specs: &[columns::Spec<C>],
     widths: &mut [f32],
-    edges: &[f32],
-    first_row: Option<egui::Rect>,
-    header_height: f32,
+    geometry: TableGeometry<'_>,
     resizable: fn(C) -> bool,
 ) {
-    let Some(first_row) = first_row else {
+    let Some(first_row) = geometry.first_row else {
         return;
     };
+    let (edges, header_height) = (geometry.edges, geometry.header_height);
     let touch = theme::pointer() == theme::Pointer::Touch;
     let line_bottom = ui.min_rect().bottom();
     let spacing = ui.spacing().item_spacing.x;

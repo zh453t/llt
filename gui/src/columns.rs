@@ -382,10 +382,10 @@ impl StopColumn {
 pub fn parse<C: Copy + PartialEq>(keys: &[String], from_key: fn(&str) -> Option<C>) -> Vec<C> {
     let mut picked: Vec<C> = Vec::new();
     for key in keys {
-        if let Some(column) = from_key(key) {
-            if !picked.contains(&column) {
-                picked.push(column);
-            }
+        if let Some(column) = from_key(key)
+            && !picked.contains(&column)
+        {
+            picked.push(column);
         }
     }
     picked
