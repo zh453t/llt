@@ -103,6 +103,21 @@ impl Dates {
     }
 }
 
+/// 启动时确定各查询页的日期。
+///
+/// 配置里存的是上次退出时选的日期：昨天可能是特意挑的，保留；前天及更早的
+/// 已经反映不了当下的开行情况，视同没有配置，直接回到今天。未来日期不受影响。
+/// 调整后的日期会在第一帧由 `LltApp::persist` 照常写回配置。
+fn startup_date(saved: Option<Date>) -> Date {
+    let today = today();
+    let Some(date) = saved else { return today };
+    match today.checked_sub(jiff::Span::new().days(1)) {
+        // 昨天（含）之后的保留原值，更早的一律回到今天。
+        Ok(yesterday) if date >= yesterday => date,
+        _ => today,
+    }
+}
+
 /// 一个查询页要画哪一半。
 ///
 /// 竖屏是「控件在上、结果在下」的一整页；横屏把两半拆到左右两栏
@@ -329,9 +344,9 @@ impl LltApp {
             tab: settings.ui.tab,
             theme: settings.ui.theme,
             dates: Dates {
-                od: settings.od.date.unwrap_or_else(today),
-                train: settings.train.date.unwrap_or_else(today),
-                station: settings.station.date.unwrap_or_else(today),
+                od: startup_date(settings.od.date),
+                train: startup_date(settings.train.date),
+                station: startup_date(settings.station.date),
             },
             train_query: settings.train.query.clone(),
             train_results: Vec::new(),
@@ -6331,5 +6346,26 @@ mod tests {
         assert!(train.runs_on(20261124));
         assert!(train.runs_on(20261125));
         assert!(!train.runs_on(20261126));
+    }
+
+    #[test]
+    fn startup_date_drops_stale_saved_dates() {
+        // `today()` 跟着系统时钟走，测试里所有日期都相对它构造。
+        let today = today();
+        let shift = |days: i64| {
+            today
+                .checked_add(jiff::Span::new().days(days))
+                .expect("日期加减失败")
+        };
+        // 配置缺失：今天。
+        assert_eq!(startup_date(None), today);
+        // 今天与未来日期：原样保留。
+        assert_eq!(startup_date(Some(shift(0))), today);
+        assert_eq!(startup_date(Some(shift(7))), shift(7));
+        // 昨天可能是特意挑的：保留。
+        assert_eq!(startup_date(Some(shift(-1))), shift(-1));
+        // 前天及更早已经过期：回到今天。
+        assert_eq!(startup_date(Some(shift(-2))), today);
+        assert_eq!(startup_date(Some(shift(-90))), today);
     }
 }
