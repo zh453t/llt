@@ -269,6 +269,9 @@ pub struct LltApp {
     via_page_open: bool,
     /// 打开经由页时的窗口尺寸；尺寸变化时关掉页面，避免模态停在旧位置。
     via_page_size: Option<egui::Vec2>,
+    /// 宽屏经由分栏是否打开（点详情入口条上的「经由」分出的右侧块，
+    /// 同点车次分出详情栏）。换车次即收起；窗口窄得分不出地方时转成弹窗。
+    via_side_open: bool,
     /// 下一次绘制时要抢焦点的输入框；宽屏生效，用完即清。
     focus_request: Option<FocusField>,
     /// 从详情跳去车站页之前的现场，用来一键回到原处。
@@ -399,6 +402,7 @@ impl LltApp {
             via_stations_only: settings.detail.via_stations_only,
             via_page_open: false,
             via_page_size: None,
+            via_side_open: false,
             // 恢复到上次停留的标签页；焦点在构造完再按当前页决定（见下）。
             focus_request: None,
             return_point: None,
@@ -948,6 +952,7 @@ impl LltApp {
         }
         self.via_page_open = false;
         self.via_page_size = None;
+        self.via_side_open = false;
         self.error = None;
         // 新页面从头开始：详情里的滚动区按 `detail_gen` 换 id，上一趟车的滚动位置不继承。
         self.detail_gen = self.detail_gen.wrapping_add(1);
@@ -984,6 +989,7 @@ impl LltApp {
         self.extras = TrainExtras::default();
         self.via_page_open = false;
         self.via_page_size = None;
+        self.via_side_open = false;
         self.train_back = None;
     }
 
@@ -2083,6 +2089,8 @@ impl LltApp {
         let previous = self.train_back.clone();
         let mut stations_only = self.via_stations_only;
         let mut via_page_open = self.via_page_open;
+        // 宽屏经由分栏的开关：入口条点一下切换，`body` 里据此分出右栏。
+        let mut via_side_open = self.via_side_open;
         // 桌面端的开行计划弹窗：和经由一样，点入口才开。
         let mut plan_page_open = self.plan_page_open;
         let mut plan_page_size = self.plan_page_size;
@@ -2257,15 +2265,13 @@ impl LltApp {
                 });
             });
         } else {
-            // 宽屏侧栏：抬头 → 杂项 → 一条入口（经由 | 开行计划）→ 表格。
-            // 经由点开就在这条入口下面就地展开，展开时独占下方全部高度、停站表暂时让位
-            // （两者各分一半时都只剩几行，谁也看不清）。
+            // 宽屏侧栏：抬头固定在上，下面是一个两向滚动块，按「时刻表 → 入口条
+            // （经由 | 开行计划）→ 杂项」排。时刻表是详情的主体，先看车再看信息；
+            // 三块共用一个滚动区，溢出时纵向一起滚。点「经由」不在滚动流里展开，
+            // 而是从窗口右侧再分出一块（`body` 里的 `via_right`，同点车次分出
+            // 详情栏）。表格列多时横向自己滑，入口条与杂项画在「摆回视口
+            // 左沿」的子 Ui 里、钉在视口宽度上，不跟着横移（同手机整页的做法）。
             let has_via = !extras.via.is_empty();
-            let mut via_open = has_via
-                && ui.data(|data| {
-                    data.get_temp::<bool>(via_state_id(detail.summary.index))
-                        .unwrap_or(false)
-                });
             header_ui(
                 ui,
                 detail,
@@ -2278,83 +2284,98 @@ impl LltApp {
             ui.add_space(theme::GAP_S);
             // 宽屏的开行计划入口在下面的入口条里，和经由同一行。
             plan.entry = false;
-            extras_ui(
-                ui,
-                &detail.summary,
-                extras,
-                &detail.stops,
-                date,
-                &mut link,
-                &mut plan,
-            );
-            ui.add_space(theme::GAP_S);
-            // 入口条：经由占剩下的宽度（它带一串摘要），开行计划按自身文字宽度。
-            let summary = via_entry_summary(&extras.via);
-            let mut entries = Vec::new();
-            if has_via {
-                entries.push(Entry {
-                    id: "via-inline",
-                    title: "经由",
-                    summary: &summary,
-                    hint: "",
-                    arrow: Some(via_open),
-                    width: None,
-                    hover: if via_open {
-                        "收起经由表"
-                    } else {
-                        "在下面展开经由表"
-                    },
-                });
-            }
-            let plan_entry = plan_entry(None);
-            let plan_width = entry_natural_width(ui, &plan_entry);
-            entries.push(Entry {
-                width: Some(plan_width),
-                ..plan_entry
-            });
-            match entry_bar_ui(ui, &entries) {
-                Some("via-inline") => {
-                    via_open = !via_open;
-                    ui.data_mut(|data| {
-                        data.insert_temp(via_state_id(detail.summary.index), via_open);
-                    });
-                }
-                Some("run-plan") => plan_page_open = true,
-                _ => {}
-            }
-            ui.add_space(theme::GAP_S);
-            if has_via && via_open {
-                via_inline_ui(
-                    ui,
-                    &extras.via,
-                    &mut DetailToggles {
-                        stations_only: &mut stations_only,
-                        via_page_open: &mut via_page_open,
-                    },
-                    &detail.stops,
-                    detail.summary.index,
-                );
-            } else {
-                // 桌面侧栏也统一走两向滚动：列多时横着滑，纵向照旧滚。
-                let height = ui.available_height();
-                let picked = scrollable_table(
-                    ui,
-                    ("train_stops_side", self.detail_gen),
-                    height,
-                    theme::detail_header_height(),
-                    |ui, content_width| {
-                        stops_table_ui(
+            let page_left = ui.available_rect_before_wrap().left();
+            // 细滚动条：同 `scrollable_table` 的做法，在继承的样式上只改宽度，
+            // 并用 `scope` 让改动只活在这个滚动块里。
+            let mut scroll_style = ui.spacing().scroll;
+            scroll_style.bar_width = 8.0;
+            scroll_style.floating_width = 4.0;
+            ui.scope(|ui| {
+                ui.style_mut().spacing.scroll = scroll_style;
+                egui::ScrollArea::both()
+                    .id_salt(("detail_side_scroll", self.detail_gen))
+                    .auto_shrink([false, false])
+                    .scroll_bar_visibility(
+                        egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                    )
+                    .show(ui, |ui| {
+                        // 滚动区内容带一圈 `content_margin`，表格、入口条和杂项都从这里起算。
+                        let margin = f32::from(ui.spacing().scroll.content_margin.left);
+                        let viewport = ui.available_width();
+                        let stale = column_layout_stale(ui, "train_stops");
+                        let natural = stops_table_width(ui, self.stop_columns.as_deref(), viewport);
+                        // 用户把列拖宽后表格内容宽度要跟上去；窗口尺寸变了的那一帧
+                        // 回到自然宽度，让列重新自适应。
+                        let needed = if stale {
+                            natural
+                        } else {
+                            remembered_table_width(ui, "train_stops").unwrap_or(natural)
+                        };
+                        let table_width = needed.max(viewport);
+                        // 停站表按行数撑开（而不是吃满剩余高度），竖向跟着页面滚。
+                        if let Some(station) = stops_table_ui(
                             ui,
                             &detail.stops,
                             self.stop_columns.as_deref(),
-                            content_width,
-                        )
-                    },
-                );
-                if let Some(station) = picked {
-                    link = Some(DetailLink::Station(station));
-                }
-            }
+                            table_width,
+                        ) {
+                            link = Some(DetailLink::Station(station));
+                        }
+                        ui.add_space(theme::GAP_M);
+                        let pinned_left = page_left + margin;
+                        let top = ui.cursor().top();
+                        let pinned_rect = egui::Rect::from_min_max(
+                            egui::pos2(pinned_left, top),
+                            egui::pos2(
+                                pinned_left + viewport,
+                                ui.max_rect().bottom().max(top + 1.0),
+                            ),
+                        );
+                        ui.scope_builder(egui::UiBuilder::new().max_rect(pinned_rect), |ui| {
+                            // 入口条：经由占剩下的宽度（它带一串摘要），开行计划按自身文字宽度。
+                            let summary = via_entry_summary(&extras.via);
+                            let mut entries = Vec::new();
+                            if has_via {
+                                entries.push(Entry {
+                                    id: "via-side",
+                                    title: "经由",
+                                    summary: &summary,
+                                    hint: "",
+                                    arrow: Some(via_side_open),
+                                    width: None,
+                                    hover: if via_side_open {
+                                        "收起经由分栏"
+                                    } else {
+                                        "在右侧分出经由表"
+                                    },
+                                });
+                            }
+                            let plan_entry = plan_entry(None);
+                            let plan_width = entry_natural_width(ui, &plan_entry);
+                            entries.push(Entry {
+                                width: Some(plan_width),
+                                ..plan_entry
+                            });
+                            match entry_bar_ui(ui, &entries) {
+                                Some("via-side") => via_side_open = !via_side_open,
+                                // `plan_page_open` 的借用已经在 `plan.open` 里，
+                                // 这里只能顺着写，不能再碰本地变量。
+                                Some("run-plan") => *plan.open = true,
+                                _ => {}
+                            }
+                            ui.add_space(theme::GAP_S);
+                            extras_ui(
+                                ui,
+                                &detail.summary,
+                                extras,
+                                &detail.stops,
+                                date,
+                                &mut link,
+                                &mut plan,
+                            );
+                        });
+                    });
+            });
         }
 
         if via_page_open && !extras.via.is_empty() {
@@ -2397,6 +2418,7 @@ impl LltApp {
         }
         self.via_stations_only = stations_only;
         self.via_page_open = via_page_open;
+        self.via_side_open = via_side_open;
         if !via_page_open {
             self.via_page_size = None;
         }
@@ -2405,6 +2427,69 @@ impl LltApp {
         }
         if let Some(link) = link {
             self.follow_detail_link(link, compact);
+        }
+    }
+
+    /// 宽屏经由分栏（`body` 里的 `via_right` 面板）里的内容。
+    ///
+    /// 分栏本身由 `body` 从窗口右侧分出（同点车次分出详情栏）；这里只管栏内：
+    /// 标题行（经由 · 车次 · 始发 → 终到，右侧「关闭」）与图例行钉在上不随表滚，
+    /// 表格占满剩余高度、内部滚动，排法与经由弹窗一致。
+    fn via_side_ui(&mut self, ui: &mut Ui) {
+        let Some(detail) = self.detail.as_ref() else {
+            return;
+        };
+        let index = detail.summary.index;
+        let code = detail.summary.code.clone();
+        let via = &self.extras.via;
+        let stops = &detail.stops;
+        let mut stations_only = self.via_stations_only;
+        let mut close = false;
+
+        ui.add_space(theme::GAP_S);
+        // 标题行：先给右侧「关闭」留好宽度（`right_to_left` 是叠加，不预留就会把
+        // 标题压到按钮底下）。经由表里站点自上而下就是走行，抬头不必再报始发终到。
+        ui.horizontal(|ui| {
+            ui.spacing_mut().interact_size.y = theme::header_height();
+            let reserve = 76.0;
+            let title_width = (ui.available_width() - reserve).max(120.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(title_width, theme::header_height()),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.label(bold("经由").size(theme::FONT_SECTION));
+                    ui.add_space(theme::GAP_S);
+                    ui.label(bold(&code).size(theme::FONT_BODY));
+                },
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.add(egui::Button::new(meta("关闭"))).clicked() {
+                    close = true;
+                }
+            });
+        });
+        ui.add_space(theme::GAP_XS);
+        // 图例行：「只看车站」在左，图例靠右。
+        ui.horizontal(|ui| {
+            ui.spacing_mut().interact_size.y = theme::chip_height();
+            ui.checkbox(&mut stations_only, meta("只看车站"));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = theme::GAP_XS;
+                via_legend_ui(ui);
+            });
+        });
+        ui.add_space(theme::GAP_XS);
+        // 高度按整行取整（同经由弹窗），避免表格底部出现半截行。
+        let height = ui.available_height();
+        let pitch = theme::detail_row_height() + ui.spacing().item_spacing.y;
+        let rows = ((height - theme::detail_header_height()) / pitch)
+            .floor()
+            .max(1.0);
+        let max_height = theme::detail_header_height() + rows * pitch;
+        via_table_ui(ui, via, stations_only, stops, index, max_height, "side");
+        self.via_stations_only = stations_only;
+        if close {
+            self.via_side_open = false;
         }
     }
 
@@ -2702,6 +2787,25 @@ impl LltApp {
         if self.detail.is_some() && !touch_page {
             let available = ui.available_width();
             if available >= WIDE_MIN_WIDTH {
+                // 宽屏经由分栏：点详情入口条上的「经由」后从右侧再分出一块
+                // （先 show 的右面板占最右，详情栏随之左移）。宽度假定同详情栏的
+                // 36% 分法，下限 300 点保证站点/线路/里程三列都不被挤掉。
+                let via_width = (available * 0.24).clamp(320.0, 400.0);
+                if self.via_side_open && !self.extras.via.is_empty() {
+                    if available >= WIDE_MIN_WIDTH + via_width {
+                        egui::Panel::right("via_right")
+                            .resizable(true)
+                            .default_size(via_width)
+                            .min_size(300.0)
+                            .max_size(480.0)
+                            .frame(theme::detail_frame(ui))
+                            .show(ui, |ui| self.via_side_ui(ui));
+                    } else {
+                        // 窗口分不出这一块：收起分栏，转成居中弹窗（同窄屏的既有行为）。
+                        self.via_side_open = false;
+                        self.via_page_open = true;
+                    }
+                }
                 // 宽屏：右侧详情栏占窗口宽度的约 36%，仍保证至少 320 点。
                 let detail_width = (available * 0.36).clamp(380.0, 560.0);
                 egui::Panel::right("detail_right")
@@ -2989,6 +3093,9 @@ impl LltApp {
         if self.columns_open.is_some() {
             // 触摸屏的表格列弹窗：返回键先收弹窗，再轮到详情/退出。
             self.columns_open = None;
+        } else if self.via_side_open {
+            // 宽屏经由分栏：它比经由弹窗更靠「外」，先收它。
+            self.via_side_open = false;
         } else if self.via_page_open {
             self.via_page_open = false;
         } else if self.detail.is_some() {
@@ -4319,11 +4426,6 @@ fn paint_collapse_arrow(ui: &Ui, rect: egui::Rect, open: bool, color: Color32) {
     ));
 }
 
-/// 宽屏侧栏的经由折叠状态按车次保存。
-fn via_state_id(train_index: i64) -> egui::Id {
-    egui::Id::unique(("llt-via", train_index))
-}
-
 /// 经由入口的一行摘要：`61 途经点 · 1463 km`。
 ///
 /// 只写这两项：点数、里程在经由页里能数出来，但入口收起时它们是最有用的两个量；
@@ -4956,60 +5058,6 @@ fn shift_month(month: i64, delta: i64) -> i64 {
 /// `yyyymm` -> `2026 年 11 月`。
 fn month_label(month: i64) -> String {
     format!("{} 年 {} 月", month / 100, month % 100)
-}
-
-/// 详情里由界面回写的两个开关，集中传递，避免参数继续膨胀。
-struct DetailToggles<'a> {
-    stations_only: &'a mut bool,
-    via_page_open: &'a mut bool,
-}
-
-/// 宽屏侧栏就地展开的经由表（点入口条上的「经由」后出现在它下面）。
-///
-/// 入口那一行不在这里画：它和「开行计划」并排在 `entry_bar_ui` 的一条线上，
-/// 所以本函数只管展开之后的工具行与表格。
-fn via_inline_ui(
-    ui: &mut Ui,
-    via: &[ViaPoint],
-    toggles: &mut DetailToggles<'_>,
-    stops: &[Stop],
-    train_index: i64,
-) {
-    if via.is_empty() {
-        return;
-    }
-    ui.horizontal(|ui| {
-        ui.spacing_mut().interact_size.y = 24.0;
-        ui.spacing_mut().item_spacing.x = theme::GAP_XS;
-        ui.checkbox(toggles.stations_only, meta("只看车站"));
-        ui.add_space(theme::GAP_M);
-        via_legend_ui(ui);
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui
-                .add(egui::Button::new(meta("放大")).min_size(egui::vec2(48.0, 24.0)))
-                .on_hover_text("在居中的大窗口里查看经由")
-                .clicked()
-            {
-                *toggles.via_page_open = true;
-            }
-        });
-    });
-    ui.add_space(theme::GAP_XS);
-    // 高度按整行取整，避免表格底部出现半截行。
-    let pitch = theme::detail_row_height() + ui.spacing().item_spacing.y;
-    let rows = ((ui.available_height() - theme::detail_header_height()) / pitch)
-        .floor()
-        .max(1.0);
-    let max_height = theme::detail_header_height() + rows * pitch;
-    via_table_ui(
-        ui,
-        via,
-        *toggles.stations_only,
-        stops,
-        train_index,
-        max_height,
-        "inline",
-    );
 }
 
 /// 窄屏时停站表上方的经由入口：整条可点，打开独立经由页。
