@@ -2038,7 +2038,6 @@ dependencies = [
  "jiff",
  "lltdb",
  "rusqlite",
- "serde",
  "serde_json",
  "tempfile",
  "ureq",

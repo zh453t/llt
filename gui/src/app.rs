@@ -2265,12 +2265,13 @@ impl LltApp {
                 });
             });
         } else {
-            // 宽屏侧栏：抬头固定在上，下面是一个两向滚动块，按「时刻表 → 入口条
-            // （经由 | 开行计划）→ 杂项」排。时刻表是详情的主体，先看车再看信息；
-            // 三块共用一个滚动区，溢出时纵向一起滚。点「经由」不在滚动流里展开，
-            // 而是从窗口右侧再分出一块（`body` 里的 `via_right`，同点车次分出
-            // 详情栏）。表格列多时横向自己滑，入口条与杂项画在「摆回视口
-            // 左沿」的子 Ui 里、钉在视口宽度上，不跟着横移（同手机整页的做法）。
+            // 宽屏侧栏：抬头固定，入口条（经由 | 开行计划）固定在时刻表上方——
+            // 经由与开行计划是详情的两条支线，翻停站表时要随时点得到，不能跟着
+            // 内容滚走。下面是一个两向滚动块，按「时刻表 → 杂项」排：时刻表是
+            // 详情的主体放最前，杂项跟在表后一起滚。点「经由」分出右侧的
+            // `via_right` 分栏（`body` 里画，同点车次分出详情栏）；表格列多时
+            // 横向自己滑，杂项画在「摆回视口左沿」的子 Ui 里、钉在视口宽度上，
+            // 不跟着横移（同手机整页的做法）。
             let has_via = !extras.via.is_empty();
             header_ui(
                 ui,
@@ -2280,10 +2281,41 @@ impl LltApp {
                 &mut header,
             );
             ui.add_space(theme::GAP_S);
-            ui.separator();
-            ui.add_space(theme::GAP_S);
             // 宽屏的开行计划入口在下面的入口条里，和经由同一行。
             plan.entry = false;
+            // 入口条：经由占剩下的宽度（它带一串摘要），开行计划按自身文字宽度。
+            // 它自带上下两条细线，接在抬头下面就是分隔线，别再补 `separator()`。
+            let summary = via_entry_summary(&extras.via);
+            let mut entries = Vec::new();
+            if has_via {
+                entries.push(Entry {
+                    id: "via-side",
+                    title: "经由",
+                    summary: &summary,
+                    hint: "",
+                    arrow: Some(via_side_open),
+                    width: None,
+                    hover: if via_side_open {
+                        "收起经由分栏"
+                    } else {
+                        "在右侧分出经由表"
+                    },
+                });
+            }
+            let plan_entry = plan_entry(None);
+            let plan_width = entry_natural_width(ui, &plan_entry);
+            entries.push(Entry {
+                width: Some(plan_width),
+                ..plan_entry
+            });
+            match entry_bar_ui(ui, &entries) {
+                Some("via-side") => via_side_open = !via_side_open,
+                // `plan_page_open` 的借用已经在 `plan.open` 里，
+                // 这里只能顺着写，不能再碰本地变量。
+                Some("run-plan") => *plan.open = true,
+                _ => {}
+            }
+            ui.add_space(theme::GAP_S);
             let page_left = ui.available_rect_before_wrap().left();
             // 细滚动条：同 `scrollable_table` 的做法，在继承的样式上只改宽度，
             // 并用 `scope` 让改动只活在这个滚动块里。
@@ -2332,38 +2364,6 @@ impl LltApp {
                             ),
                         );
                         ui.scope_builder(egui::UiBuilder::new().max_rect(pinned_rect), |ui| {
-                            // 入口条：经由占剩下的宽度（它带一串摘要），开行计划按自身文字宽度。
-                            let summary = via_entry_summary(&extras.via);
-                            let mut entries = Vec::new();
-                            if has_via {
-                                entries.push(Entry {
-                                    id: "via-side",
-                                    title: "经由",
-                                    summary: &summary,
-                                    hint: "",
-                                    arrow: Some(via_side_open),
-                                    width: None,
-                                    hover: if via_side_open {
-                                        "收起经由分栏"
-                                    } else {
-                                        "在右侧分出经由表"
-                                    },
-                                });
-                            }
-                            let plan_entry = plan_entry(None);
-                            let plan_width = entry_natural_width(ui, &plan_entry);
-                            entries.push(Entry {
-                                width: Some(plan_width),
-                                ..plan_entry
-                            });
-                            match entry_bar_ui(ui, &entries) {
-                                Some("via-side") => via_side_open = !via_side_open,
-                                // `plan_page_open` 的借用已经在 `plan.open` 里，
-                                // 这里只能顺着写，不能再碰本地变量。
-                                Some("run-plan") => *plan.open = true,
-                                _ => {}
-                            }
-                            ui.add_space(theme::GAP_S);
                             extras_ui(
                                 ui,
                                 &detail.summary,
