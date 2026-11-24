@@ -222,6 +222,38 @@ impl DataPage {
         self.task.is_some()
     }
 
+    /// 启动时静默检查一次线上版本：只发一次 2 KB 的请求，不弹窗、不阻塞首帧。
+    ///
+    /// 结论落在 `remote` 上，界面用 [`Self::newer_data`] 判断要不要提示「发现新数据」。
+    /// 拿不到版本时（离线、接口挂了）只听之任之：设置页的「更新」小节会写一句失败原因。
+    pub fn check_on_startup(&mut self, ctx: &egui::Context) {
+        if self.busy() {
+            return;
+        }
+        self.start_check(ctx);
+    }
+
+    /// 线上有没有比本地新的数据：`(本地版本, 线上版本)`。
+    ///
+    /// 比对口径就是 [`lltdata::update::RemoteVersion::data_is_newer_than`]（8 位版本号按数值比），
+    /// 与「检查更新」按钮、`llt check` 给出的结论一致，界面上不会出现两套说法。
+    pub fn newer_data(&self) -> Option<(&str, &str)> {
+        let remote = self.remote.as_ref()?.as_ref().ok()?;
+        let local = self.local.as_ref()?.data_version.as_deref()?;
+        if !remote.data_is_newer_than(Some(local))? {
+            return None;
+        }
+        remote.data_version.as_deref().map(|latest| (local, latest))
+    }
+
+    /// 取走后台任务的结果。
+    ///
+    /// 和 [`Self::contents`] 里那一遍是同一件事：启动时的检查、下载重建都不依赖用户
+    /// 停在数据页，调用方（`LltApp::ui`）每帧也收一次，结果才不会被晾在 channel 里。
+    pub fn poll(&mut self, db_path: &Path, outcome: &mut DataOutcome) {
+        self.poll_task(db_path, outcome);
+    }
+
     /// 画这一页。返回是否需要重开数据库。
     /// 独立成页时用（首次启动没有库、落在「数据」页）：自带滚动容器。
     pub fn ui(&mut self, ui: &mut Ui, db_path: &Path) -> DataOutcome {
@@ -482,8 +514,10 @@ impl DataPage {
             let result = lltdata::update::fetch(&ver_url, Duration::from_secs(20))
                 .map(TaskDone::Remote)
                 .map_err(|err| format!("{err:#}"));
-            let _ = ctx; // 线程不需要催帧：界面轮询
             let _ = tx.send(result);
+            // 结果可能在任何页面上被取走（启动时的自动检查就不在数据页）：
+            // 界面没有别的事件时不会自己重绘，这里催一帧去取。
+            ctx.request_repaint();
         });
         self.task = Some(Task {
             kind: TaskKind::Check,
@@ -529,8 +563,8 @@ impl DataPage {
                     })
                 })
                 .map_err(|err| format!("{err:#}"));
-            let _ = ctx;
             let _ = tx.send(result);
+            ctx.request_repaint();
         });
         self.task = Some(Task {
             kind: TaskKind::Build,
@@ -598,8 +632,8 @@ impl DataPage {
             let result = export_backup(&source, &target_dir, version.as_deref())
                 .map(TaskDone::Exported)
                 .map_err(|err| format!("{err:#}"));
-            let _ = ctx;
             let _ = tx.send(result);
+            ctx.request_repaint();
         });
         self.task = Some(Task {
             kind: TaskKind::Export,
@@ -618,8 +652,8 @@ impl DataPage {
             let result = import_backup(&source, &target, &backup_dir)
                 .map(TaskDone::Rebuilt)
                 .map_err(|err| format!("{err:#}"));
-            let _ = ctx;
             let _ = tx.send(result);
+            ctx.request_repaint();
         });
         self.task = Some(Task {
             kind: TaskKind::Import,
@@ -923,3 +957,62 @@ fn button(ui: &mut Ui, text: &str) -> egui::Response {
 const _: () = {
     let _ = config::Tab::Data;
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(version: Option<&str>) -> LocalState {
+        LocalState {
+            path: PathBuf::from("db.sqlite"),
+            data_version: version.map(str::to_owned),
+            schema_version: Some(lltdata::export::SCHEMA_VERSION),
+            ..Default::default()
+        }
+    }
+
+    fn remote(version: Option<&str>) -> RemoteVersion {
+        RemoteVersion {
+            data_version: version.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    /// 线上比本地新才提示；**同一个版本重复启动不能再打扰一次**（数值比较）。
+    #[test]
+    fn newer_data_only_when_remote_is_newer() {
+        let mut page = DataPage::new(DataDirs::default(), None);
+        page.local = Some(state(Some("20261120")));
+        page.remote = Some(Ok(remote(Some("20261127"))));
+        assert_eq!(page.newer_data(), Some(("20261120", "20261127")));
+
+        page.remote = Some(Ok(remote(Some("20261120"))));
+        assert_eq!(page.newer_data(), None);
+
+        // 本地更新（例如导入了备份）时不提示。
+        page.remote = Some(Ok(remote(Some("20261113"))));
+        assert_eq!(page.newer_data(), None);
+    }
+
+    /// 没有库、没查过、查询失败、版本号对不上——都当作「没有更新」，不提示。
+    #[test]
+    fn newer_data_needs_both_versions() {
+        let mut page = DataPage::new(DataDirs::default(), None);
+        page.remote = Some(Ok(remote(Some("20261127"))));
+        assert_eq!(page.newer_data(), None);
+
+        page.local = Some(state(Some("20261120")));
+        page.remote = None;
+        assert_eq!(page.newer_data(), None);
+
+        page.remote = Some(Err("无法访问版本接口".to_owned()));
+        assert_eq!(page.newer_data(), None);
+
+        page.remote = Some(Ok(remote(None)));
+        assert_eq!(page.newer_data(), None);
+
+        page.local = Some(state(None));
+        page.remote = Some(Ok(remote(Some("20261127"))));
+        assert_eq!(page.newer_data(), None);
+    }
+}

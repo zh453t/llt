@@ -284,6 +284,9 @@ pub struct LltApp {
     platform: crate::Platform,
     /// 「数据」页的状态（当前库、线上版本、后台任务、备份列表）。
     data: crate::data::DataPage,
+    /// 用户已经「忽略」掉的那句「发现新数据」（存线上版本号）：同一个版本只提一次，
+    /// 线上再出新版本时重新提示。只在本次会话里有效，不落盘。
+    dismissed_update: Option<String>,
     /// 上一帧拿着键盘焦点的控件（而不是「有没有焦点」）：从出发框跳到到达框时
     /// 焦点一直是 `Some`，但输入法连接需要重挂一次。
     ime_focus: Option<egui::Id>,
@@ -340,6 +343,7 @@ impl LltApp {
             db: None,
             db_suspended: false,
             data: data_page,
+            dismissed_update: None,
             db_path,
             db_error: None,
             data_version: None,
@@ -434,6 +438,9 @@ impl LltApp {
         app.focus_request = Some(app.focus_field(app.tab));
         app.open_db();
         app.data.refresh(&app.db_path);
+        // 启动时静默查一次线上数据版本（后台线程，不在首帧里联网）：
+        // 有更新的数据会在顶栏下面提示一句，用户不必自己去「设置」里点「检查更新」。
+        app.data.check_on_startup(&cc.egui_ctx);
         // 提示放在 open_db 之后：恢复查询会先清空 `error`。
         if let Some(warning) = config_warning {
             app.error = Some(warning);
@@ -1124,6 +1131,64 @@ impl LltApp {
         };
         if ui.add(egui::Button::new(meta(label))).clicked() {
             self.set_theme(ui.ctx(), next);
+        }
+    }
+
+    /// 内容区顶部的提示行：线上有新数据（可去看、可忽略）+ 出错信息。
+    ///
+    /// 两个横幅都画在这里，因为横屏左栏与竖屏中央都只调这一个入口。
+    fn notice_banner(&mut self, ui: &mut Ui) {
+        self.update_banner(ui);
+        self.error_banner(ui);
+    }
+
+    /// 「发现新数据」：启动时静默查到的线上版本比本地新时提示一句。
+    ///
+    /// 已经在设置页就不提示了（那一页自己写着「线上数据 … 发现新数据 …」）；
+    /// 点「查看」跳过去，点「忽略」就在本次会话里不再提这一个版本。
+    fn update_banner(&mut self, ui: &mut Ui) {
+        if self.tab == Tab::Data {
+            return;
+        }
+        let mut view = false;
+        let mut dismiss: Option<String> = None;
+        if let Some((local, latest)) = self.data.newer_data()
+            && self.dismissed_update.as_deref() != Some(latest)
+        {
+            let color = ui.visuals().hyperlink_color;
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("发现新数据 {local} → {latest}"))
+                        .size(theme::FONT_META)
+                        .color(color),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    // 横幅上的按钮要按控件高度取尺寸：触摸屏上 `small_button` 那点高度手指点不中。
+                    let size = egui::vec2(0.0, theme::control_height());
+                    if ui
+                        .add(egui::Button::new(meta("忽略")).min_size(size))
+                        .clicked()
+                    {
+                        dismiss = Some(latest.to_owned());
+                    }
+                    if ui
+                        .add(egui::Button::new(meta("查看")).min_size(size))
+                        .clicked()
+                    {
+                        view = true;
+                    }
+                });
+            });
+            ui.add_space(theme::GAP_S);
+        }
+        if let Some(latest) = dismiss {
+            self.dismissed_update = Some(latest);
+        }
+        if view {
+            // 与点「设置」标签页走同一条路径：重读库状态、把焦点交回查询框。
+            self.tab = Tab::Data;
+            self.focus_request = Some(self.focus_field(Tab::Data));
+            self.data.refresh(&self.db_path);
         }
     }
 
@@ -2634,6 +2699,9 @@ impl eframe::App for LltApp {
         }
         self.pump_ime(ui.ctx());
         self.handle_back(ui.ctx());
+        // 数据页的后台任务（启动时的版本检查、下载重建）在任何页面都要收尾：
+        // 否则用户不打开「设置」就永远看不到结果，库也一直不重开。
+        self.poll_data(ui.ctx());
         self.persist(ui.ctx());
         self.sync_system_bars(ui.ctx());
         if !self.window_fitted {
@@ -2867,7 +2935,7 @@ impl LltApp {
                             ui.add_space(theme::GAP_XS);
                             ui.separator();
                             ui.add_space(theme::GAP_XS);
-                            self.error_banner(ui);
+                            self.notice_banner(ui);
                             self.tab_ui(ui, TabPart::Controls);
                         });
                 });
@@ -2899,7 +2967,7 @@ impl LltApp {
                     self.detail_page_ui(ui);
                     return;
                 }
-                self.error_banner(ui);
+                self.notice_banner(ui);
                 self.tab_ui(ui, TabPart::Stacked);
             });
     }
@@ -3415,6 +3483,17 @@ impl LltApp {
             self.db_suspended = false;
             self.open_db();
             self.data.refresh(&self.db_path);
+        }
+    }
+
+    /// 推进数据页的后台任务（每帧一次，不等数据页被绘制）。
+    fn poll_data(&mut self, ctx: &egui::Context) {
+        let mut outcome = crate::data::DataOutcome::default();
+        self.data.poll(&self.db_path, &mut outcome);
+        self.apply_data_outcome(outcome);
+        if self.data.busy() {
+            // 任务没结束前偶尔催一帧：界面空闲时不会自己重绘，进度与结果就没人来收。
+            ctx.request_repaint_after(Duration::from_millis(200));
         }
     }
 
