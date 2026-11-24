@@ -13,15 +13,18 @@
 | `gui` | `llt-gui`（lib `llt_gui`） | egui 界面，桌面可执行 + 给 Android 复用的库 |
 | `android` | `llt-gui-android` | NativeActivity 壳、JNI、Gradle；**独立 Cargo 包，不在 workspace** |
 | `docs` | — | 逆向报告、Android、配置方案 |
+| `scripts` | — | 本仓维护的 PowerShell 脚本：`scripts/installer`（桌面安装包）、`scripts/debug`（GUI 调试） |
 | `out` / `tools` / `test` | — | 被 `.gitignore` 忽略的本机目录 |
 
 依赖方向：`llt → lltdb`、`llt → lltdata → lltdb`、`llt-gui → lltdb`、`llt-gui → lltdata`；
 `lltdb` 不碰 GUI / 网络，`lltdata` 不碰 GUI，`gui` 里**没有** `cfg(target_os)`。
 
 - `out/`：运行时数据与产物（`out/timetable/llt-timetable.sqlite`、导出的 CSV、
-  `out/data/an`）。`out/timetable/README.md` 是本机的数据说明，**不在版本库**。
+  `out/data/an`、`out/installer/*.exe`、调试截图）。`out/timetable/README.md` 是本机的数据说明，
+  **不在版本库**。
 - `tools/`：Python 版解码脚本，本机保留、不在版本库。不要把「新增文件」放这两处，也不要在
   提交的文档里让读者去找版本库里没有的文件。
+- `scripts/`：与架构相关、值得进版本库的脚本（安装包与 GUI 调试），改动就跟着提交。
 
 ## 2 常用命令（原生 Windows + pwsh）
 
@@ -85,7 +88,7 @@ emulator -avd llt -no-window -gpu swiftshader_indirect -no-audio -no-snapshot
 - **截屏全黑**：屏幕休眠/锁屏时 `screencap` 返回全黑，先 `input keyevent KEYCODE_WAKEUP`
   或 `wm dismiss-keyguard`；锁屏时 `input swipe` 会拉到通知栏。
 - **桌面窗口比屏幕宽**时普通屏幕截图会截不全：用 `PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT)`
-  抓整窗；远程会话里合成的鼠标点击常常无效，能用环境变量/重跑二进制验证的就别点。
+  抓整窗（现成脚本见 §7）；远程会话里合成的鼠标点击常常无效，能用环境变量/重跑二进制验证的就别点。
 - 桌面 / 模拟器 / 真机三边的 `pixels_per_point` 不同，别看截图里的像素数字直接当逻辑点用；
   需要精确数值时在代码里 `eprintln!` 打 `Rect`。
 - **验证详情页别指望合成点击**：远程会话里 `mouse_event` 经常不生效，而 `SetWindowPos`
@@ -112,4 +115,27 @@ emulator -avd llt -no-window -gpu swiftshader_indirect -no-audio -no-snapshot
 - `docs/gui-config.md`：`llt-gui.json` 的方案、字段、写入时机与取舍。
 - `gui/README.md`：界面行为与实现细节（很长，按需查具体章节）。
 - `cli/README.md`：CLI 用法与参数。
+- `scripts/installer/README.md`：桌面安装包用法。
+- `scripts/debug/README.md`：GUI 调试脚本清单与注意事项。
 - `out/timetable/README.md`：本机数据说明（表结构、数据版本；不在版本库）。
+
+## 7 脚本（`scripts/`，进版本库）
+
+装载模板与调试脚本都在 `scripts/` 下，改动跟代码一起提交；两者的完整清单与参数见各自目录的
+`README.md`。产物（安装包、截图）仍写被忽略的 `out/`。
+
+### 7.1 `scripts/debug/`（GUI 调试）
+
+- 常用几个：`focus_click.ps1`（置前 + 点击/拖拽，远程会话最稳）、`move.ps1`（改窗口尺寸验宽窄布局）、
+  `shot.ps1 -Window`（PrintWindow 抓整窗，窗口比屏幕宽时必用）、`slowdrag.ps1`（长按拖拽）。
+- 公共逻辑在 `scripts\debug\_common.ps1`（置前、DPI、点击/拖拽、中文粘贴、打断检测），
+  各脚本统一调用；`win.ps1` 无参只打印矩形，`-TopMost` 用完自动还原，不会让应用一直置顶。
+- 坐标是物理像素不是逻辑点；除 `shot.ps1` 全屏模式外都要求 `llt-gui` 正在运行。
+- 调试过程中有时会受用户操作影响，出现点击错位、失效等问题，脚本会自动重试或告警，重试即可。
+
+### 7.2 `scripts/installer/`（Windows 安装包）
+
+- `pwsh -File scripts/installer/build.ps1 [-Build] [-BundleDb] [-Version x.y.z]`；
+  版本默认读 `Cargo.toml` 的 `[workspace.package] version`，产物写 `out/installer/`。
+- `.iss` 里的源目录 / 输出目录相对脚本位置解析（`..\..\target\release` 等），
+  改动脚本层级时这三个 `#define` 要同步改。

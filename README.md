@@ -100,6 +100,14 @@ Android 的 APK 单独构建（需要 NDK 与 Gradle，见 [`docs/android.md`](d
 pwsh -File android/build.ps1 -Release   # -> android/app/build/outputs/apk/release/app-release.apk
 ```
 
+Windows 安装包用 Inno Setup 打（脚本在 `scripts/installer/`）：
+
+```powershell
+pwsh -File scripts/installer/build.ps1 -Build   # -> out/installer/llt-gui-setup-<版本>.exe
+```
+
+界面调试用的 PowerShell 脚本在 `scripts/debug/`（清单与参数见该目录 `README.md`）。
+
 参与开发请先看 [`CONTRIBUTING.md`](CONTRIBUTING.md)（提交规范）、
 [`AGENTS.md`](AGENTS.md)（项目结构、命令与验证流程）；
 界面行为与实现细节在 [`gui/README.md`](gui/README.md)，数据格式在

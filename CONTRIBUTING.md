@@ -29,6 +29,7 @@
 - `gui` — `gui/`、`android/`（同一套界面，Android 只是入口与打包）
 - `lltdata` — `crates/lltdata/`（下载 / 解包 / 解码 / 写库，三端共用）
 - `tools` — `tools/` 下的解码脚本
+- `scripts` — `scripts/` 下的安装包与调试脚本
 - `data` — `out/` 产物与数据版本说明
 - `docs` — `docs/` 逆向报告
 
