@@ -13,6 +13,13 @@ path = "src/lib.rs"
 name = "llt-gui"
 path = "src/main.rs"
 
+[features]
+# 调试用：`EGUI_INSPECTION=1 cargo run -p llt-gui --features inspection` 后
+# egui-mcp 就能读到界面树、注入点击、截图、改窗口尺寸（见 scripts/debug/README.md）。
+# 缺省关闭，正常构建与发布包里没有这条通道。
+# 注意：Android 包不打开它——inspection 走 TCP，手机上没用处。
+inspection = ["eframe/inspection"]
+
 [dependencies]
 egui_extras.workspace = true
 jiff.workspace = true
