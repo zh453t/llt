@@ -36,6 +36,10 @@ cargo fmt -p llt-gui
 cargo check -p llt-gui
 cargo test -p llt-gui --lib
 
+# 调试通道：egui-mcp 读界面树 / 注入点击输入 / 截图 / 按逻辑点改窗口（缺省关，发布包不含）
+$env:EGUI_INSPECTION = '1'
+cargo run -p llt-gui --features inspection
+
 # 全量
 cargo build --workspace --release   # -> target\release\llt.exe、llt-gui.exe
 cargo test --workspace
@@ -70,7 +74,8 @@ emulator -avd llt -no-window -gpu swiftshader_indirect -no-audio -no-snapshot
 
 1. `cargo fmt` / `cargo check` / `cargo test -p llt-gui --lib`（涉及 `lltdb`/`lltdata` 时跑 workspace）。
 2. 界面改动**必须跑起来看**，不要只靠 `check`：
-   - 桌面：点一遍三种查询 + 车次详情（浅色/深色各看一眼）。
+   - 桌面：点一遍三种查询 + 车次详情（浅色/深色各看一眼）。用 §4 的 egui-mcp 通道驱动，
+     不需要置前窗口，也能按逻辑点改尺寸；验证列宽 / 布局时先量一次"打开前"再量"打开后"。
    - Android：`build.ps1 -Release` + `adb install`，再用 `adb shell input tap / swipe`
      注入手势（触摸屏的「按住」用 `swipe` 配 duration ≥ 800 ms），`screencap` 截图核对；
      Rust 侧要看数据时临时加 `eprintln!` + `logcat -s RustStdoutStderr`，确认后**删掉**。
@@ -92,8 +97,12 @@ emulator -avd llt -no-window -gpu swiftshader_indirect -no-audio -no-snapshot
 - 桌面 / 模拟器 / 真机三边的 `pixels_per_point` 不同，别看截图里的像素数字直接当逻辑点用；
   需要精确数值时在代码里 `eprintln!` 打 `Rect`。
 - **验证详情页别指望合成点击**：远程会话里 `mouse_event` 经常不生效，而 `SetWindowPos`
-  改窗口大小后画面也不一定重绘到截图里。可靠的办法是临时加一个 `LLT_DEBUG_TRAIN=<车次号>`
-  之类的钩子自动打开详情，再用 `eprintln!` 打关键 `Rect` 核对布局，验完两样都删掉。
+  改窗口大小后画面也不一定重绘到截图里。桌面优先走**协议调试**：
+  `$env:EGUI_INSPECTION='1' cargo run -p llt-gui --features inspection`（或给
+  `Start-Process` 这个环境变量），之后用 `egui-mcp` 读 AccessKit 界面树、注入点击 / 输入、
+  截图、按逻辑点改窗口尺寸，不依赖窗口置前。注意：点表格**行**要落在单元格的空白处
+  （文字标签会把点击吃掉）；截图里的像素不是逻辑点，要精确值就临时 `eprintln!` 打 `Rect`，
+  验完删掉。兜底的老办法仍是临时加 `LLT_DEBUG_TRAIN=<车次号>` 之类的钩子自动打开详情。
 
 ## 5 代码约定（细节见 `gui/AGENTS.md`）
 
@@ -128,6 +137,9 @@ emulator -avd llt -no-window -gpu swiftshader_indirect -no-audio -no-snapshot
 
 - 常用几个：`focus_click.ps1`（置前 + 点击/拖拽，远程会话最稳）、`move.ps1`（改窗口尺寸验宽窄布局）、
   `shot.ps1 -Window`（PrintWindow 抓整窗，窗口比屏幕宽时必用）、`slowdrag.ps1`（长按拖拽）。
+- 走协议、不走鼠标的另一条路：`$env:EGUI_INSPECTION='1'; cargo run -p llt-gui --features inspection`
+  之后用 `egui-mcp` 直接读控件树 / 按 id 点击 / 按逻辑点改窗口尺寸（界面改动优先用它，
+  需要坐标和 `Rect` 时比猜像素可靠）；用法见 `scripts/debug/README.md`。
 - 公共逻辑在 `scripts\debug\_common.ps1`（置前、DPI、点击/拖拽、中文粘贴、打断检测），
   各脚本统一调用；`win.ps1` 无参只打印矩形，`-TopMost` 用完自动还原，不会让应用一直置顶。
 - 坐标是物理像素不是逻辑点；除 `shot.ps1` 全屏模式外都要求 `llt-gui` 正在运行。

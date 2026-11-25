@@ -18,6 +18,21 @@
 | `paste.ps1` | 写剪贴板 + Ctrl+V 粘贴；`-Text` 必填，结束尽量恢复原剪贴板文本 | `-Text "北京"` `[-NoFocus]` |
 | `shot.ps1` | 截图。默认全虚拟屏；`-Window` 用 PrintWindow + DWM 可见框抓整窗（比屏幕宽也抓得全、无黑边） | `[-Window] [-Path] [-ProcessName]` |
 
+## egui-mcp（协议驱动，不走鼠标）
+
+除了上面这些 Win32 脚本，`llt-gui` 还可以开一条**进程内检查通道**，让 `egui-mcp` 直接读
+界面树、注入点击 / 输入、截图、改窗口尺寸（不依赖窗口置前，远程会话也能用）：
+
+```powershell
+# 只有带 inspection feature 的构建才有这条通道（缺省关，发布包没有它）
+$env:EGUI_INSPECTION = '1'
+cargo run -p llt-gui --features inspection
+```
+
+跑起来后向 `127.0.0.1:5719` 连上即可（pi 的 `egui` MCP 已配好）。注意两点：
+- 点表格**行**要落在单元格的空白处（文字标签会把点击吃掉），这是测试工具的限制，不是应用 bug。
+- 看列宽 / 布局别靠截图像素推算：需要精确值临时加 `eprintln!`，验完删掉（见 AGENTS.md §4）。
+
 ## 行为约定与注意事项
 
 - **统一公共逻辑**（`_common.ps1`）：DPI 感知、找带窗口的进程（多实例不再选错）、置前

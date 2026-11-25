@@ -127,6 +127,11 @@
 
 不能仅以编译通过作为 UI 修改完成的标准。
 
+需要按坐标点击、读界面树 / 控件矩形、或以代码的固定尺寸改窗口时，不必依赖 Win32 脚本
+（远程会话里合成鼠标经常不生效）：用 `cargo run -p llt-gui --features inspection` 配合
+`egui-mcp`，用法见 [`../scripts/debug/README.md`](../scripts/debug/README.md)。
+注意点表格**行**要落在单元格的空白处（文字标签会把点击吃掉）。
+
 ## 完成标准
 
 - 整体视觉风格统一。
