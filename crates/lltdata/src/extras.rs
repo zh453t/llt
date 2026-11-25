@@ -1,17 +1,21 @@
-//! 附加数据（经由 / 交路 / 餐车）的汇总加载。
+//! 附加数据（经由 / 交路 / 餐车 / 同城车站 / 站台 / 车次变化）的汇总加载。
 //!
-//! 这些数据来自 `an.db` 里的 `routes.dat`、`jlb.dat`、`sp.dat`、`extra.dat`。
+//! 这些数据来自 `an.db` 里的 `routes.dat`、`jlb.dat`、`sp.dat`、`extra.dat`、
+//! `sn.dat`、`xw.dat`、`plat.dat`。
 //! 它们属于“增强信息”，缺失或损坏时不应该让整次解码失败，
 //! 因此这里统一记进 `notes`，由调用方提示用户。
 
 use std::collections::HashMap;
 
 use crate::archive::ShardDir;
+use crate::decode::Train;
 use crate::duty::{self, Duties};
 use crate::format::variants;
+use crate::platform::Platforms;
 use crate::routes::{self, Routes, ViaPoint};
 use crate::samecity::{self, SameCity};
 use crate::spdata;
+use crate::xw::Changes;
 
 /// 一趟车的经由。
 #[derive(Debug)]
@@ -54,6 +58,10 @@ pub struct Extras {
     pub station_names: Vec<String>,
     /// `t.rule` 开行周期表，下标即车次头里的 `ruleIndex`。
     pub rules: Vec<RunRule>,
+    /// `xw.dat` 车次变化（同一趟车途中改车次号）。
+    pub changes: Option<Changes>,
+    /// `plat.dat` 站台 / 出站口提示。
+    pub platforms: Option<Platforms>,
     pub notes: Vec<String>,
 }
 
@@ -73,6 +81,10 @@ impl Extras {
         let same_city = load_same_city(shards, stations.len(), &mut notes);
         // 开行周期：t.rule，缺了只是没有日历，不影响时刻表。
         let rules = load_rules(shards, &mut notes);
+        // 站台：plat.dat，缺了只是详情页少一列。
+        let platforms = load_platforms(shards, &mut notes);
+        // 车次变化：xw.dat，缺了每站显示车次名的第一段。
+        let changes = load_changes(shards, &mut notes);
 
         Self {
             routes,
@@ -87,8 +99,42 @@ impl Extras {
                 .collect(),
             station_names: stations.to_vec(),
             rules,
+            changes,
+            platforms,
             notes,
         }
+    }
+
+    /// 把 `xw.dat` / `plat.dat` 的结果补进停站记录。
+    ///
+    /// `display_train` 按该站累计里程选分段（没有数据时保持 `t.i` 车次名的第一段）；
+    /// `platform` 在数据里没有该 (车次, 车站) 时留空。
+    pub fn annotate_stops(&self, trains: &mut [Train]) {
+        for train in trains {
+            for stop in &mut train.stops {
+                if let Some(changes) = &self.changes {
+                    stop.display_train = changes.shown(train.index, &train.code, stop.km);
+                }
+                if let Some(platforms) = &self.platforms {
+                    stop.platform = platforms
+                        .get(train.index, stop.station_index)
+                        .unwrap_or_default()
+                        .to_owned();
+                }
+            }
+        }
+    }
+
+    /// `xw.dat` 里有分段的记录数。
+    pub fn train_change_count(&self) -> usize {
+        self.changes
+            .as_ref()
+            .map_or(0, Changes::changed_record_count)
+    }
+
+    /// `plat.dat` 的记录数（不等同于实际有站台的停站条数）。
+    pub fn platform_record_count(&self) -> usize {
+        self.platforms.as_ref().map_or(0, Platforms::len)
     }
 
     /// `station_index` -> 车站名。
@@ -179,6 +225,36 @@ fn load_rules(shards: &ShardDir, notes: &mut Vec<String>) -> Vec<RunRule> {
         }
     }
     rules
+}
+
+/// 解析 `plat.dat`：车次 × 车站 -> 站台 / 出站口。
+fn load_platforms(shards: &ShardDir, notes: &mut Vec<String>) -> Option<Platforms> {
+    let Ok(bytes) = shards.read("plat.dat") else {
+        notes.push("缺少 plat.dat，停站表没有站台信息".to_owned());
+        return None;
+    };
+    match Platforms::parse(&bytes) {
+        Ok(platforms) => Some(platforms),
+        Err(err) => {
+            notes.push(format!("plat.dat 解析失败：{err}"));
+            None
+        }
+    }
+}
+
+/// 解析 `xw.dat`：同一趟车途中改用车次号的分段点。
+fn load_changes(shards: &ShardDir, notes: &mut Vec<String>) -> Option<Changes> {
+    let Ok(bytes) = shards.read("xw.dat") else {
+        notes.push("缺少 xw.dat，显示车次只取车次名第一段".to_owned());
+        return None;
+    };
+    match Changes::parse(&bytes) {
+        Ok(changes) => Some(changes),
+        Err(err) => {
+            notes.push(format!("xw.dat 解析失败：{err}"));
+            None
+        }
+    }
 }
 
 fn load_routes(shards: &ShardDir, notes: &mut Vec<String>) -> (Option<Routes>, Vec<TrainVia>) {

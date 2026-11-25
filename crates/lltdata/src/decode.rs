@@ -9,6 +9,9 @@
 //!            [11..12] 未知 [13..14] base255 停站数 N
 //!   停站 N × 7B：站号 base255 | 时 | 分 | 停留分 | 累计 km base255
 //!
+//! 站台（`plat.dat`）与途中改车次号（`xw.dat`）不在这里解析，
+//! 属于附加信息，由 `extras` 补进 [`Stop::platform`] / [`Stop::display_train`]。
+//!
 //! 车站分片 sN.dat（车站 i 在 s[(i+1)%10].dat）
 //!   key 2B base255 站号 | count 2B base255 车次数 M | M × 2B base255 车次编号
 //! ```
@@ -19,6 +22,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::archive::{ShardDir, summarize};
 use crate::format::{b128, b255, read_index, train_no, type_name};
+use crate::xw;
 
 /// 一趟车的全部信息。
 #[derive(Debug)]
@@ -42,6 +46,10 @@ pub struct Train {
 pub struct Stop {
     pub station_index: u32,
     pub station: String,
+    /// 这一站显示的䘥次号（`xw.dat` 的车次变化；无分段时是 `t.i` 车次名的第一段）。
+    pub display_train: String,
+    /// 站台 / 出站口提示（`plat.dat`），没有数据时为空字符串。
+    pub platform: String,
     pub km: u32,
     pub arrive: String,
     pub depart: String,
@@ -184,6 +192,7 @@ fn parse_train_shard(bytes: &[u8], stations: &[String], codes: &[String]) -> Res
             .get(index as usize)
             .cloned()
             .unwrap_or_else(|| format!("?{index}"));
+        let stops = build_stops(raw, xw::first_part(&code));
         out.push(Train {
             index,
             train_no: train_no(&code).to_owned(),
@@ -192,7 +201,7 @@ fn parse_train_shard(bytes: &[u8], stations: &[String], codes: &[String]) -> Res
             date_from: b128(header, 3, 4),
             date_to: b128(header, 7, 4),
             rule_index: b255(header, 11),
-            stops: build_stops(raw),
+            stops,
         });
         offset = cursor;
     }
@@ -209,7 +218,10 @@ struct RawStop {
 }
 
 /// 把「时:分 + 停留」换算成自首站起的绝对分钟数，并处理跨天。
-fn build_stops(raw: Vec<RawStop>) -> Vec<Stop> {
+///
+/// `display_train` 先按「没有车次变化」写成第一段；有 `xw.dat` 时由
+/// [`crate::extras::Extras::annotate_stops`] 按里程改写。
+fn build_stops(raw: Vec<RawStop>, display_train: &str) -> Vec<Stop> {
     let mut stops = Vec::with_capacity(raw.len());
     let mut previous_departure: Option<u32> = None;
 
@@ -230,6 +242,8 @@ fn build_stops(raw: Vec<RawStop>) -> Vec<Stop> {
         stops.push(Stop {
             station_index: stop.station_index,
             station: stop.station,
+            display_train: display_train.to_owned(),
+            platform: String::new(),
             km: stop.km,
             arrive: hhmm(arrive_min),
             depart: hhmm(depart_min),
@@ -384,7 +398,7 @@ mod tests {
                 km: 150,
             },
         ];
-        let stops = build_stops(raw);
+        let stops = build_stops(raw, "G1");
         assert_eq!(stops[0].day, 1);
         assert_eq!(stops[0].depart_min, 23 * 60 + 55);
         assert_eq!(stops[1].day, 2);

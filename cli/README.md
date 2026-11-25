@@ -5,7 +5,8 @@
 - `llt build`：把路路通（`com.lltskb.lltskb`）的离线数据包 `an.db` 变成
   `llt-timetable.sqlite` 或三个 CSV；
 - `llt query`：直接查询已生成的 SQLite（车次 / 停站 / 车站 / 站到站），
-  `query train` / `query stops` 会同时显示交路、编组、担当与经由；
+  `query train` / `query stops` 会同时显示交路、编组、担当与经由，
+  `query stops` 另带逐站「显示车次」（`xw.dat` 车次变化）与站台 / 出站口（`plat.dat`）；
 - 不带子命令时打印帮助。
 
 `an.db` 的名字有误导：它其实是个 **zip 容器**（未加密、deflate 压缩），里面是
@@ -139,7 +140,8 @@ G5    高速动车    07:40  12:32      4小时52分   1334 km  北京 → 上�
 `{query, date, total, shown, truncated, items: [...]}`，`stops` 为
 `{query, train, train_index, count, stops: [...]}`（另有车型、起终站、里程、开行区间）；
 条目字段与表结构同名
-（如 `train`、`first_station`、`arrive_min`、`duration_min`）。
+（如 `train`、`first_station`、`arrive_min`、`duration_min`）；`stops` 的条目另有
+`display_train`（该站显示的车次）与 `platform`（站台 / 出站口，没有数据时为空字符串）。
 `query train` / `query stops` 的条目还带三组附加数据：
 
 | 字段 | 内容 |
@@ -198,8 +200,10 @@ G5    高速动车    07:40  12:32      4小时52分   1334 km  北京 → 上�
 4. 校验 zip 魔数后解出需要的分片到 `临时目录/an`；`ver.txt` 有内容时打印数据版本，并写进 sqlite 的 `meta` 表 / `PRAGMA user_version`。
 5. 解码：`s.i`/`t.i` 索引 + 20 个 `tN.dat` 车次分片（必需）+ 10 个 `sN.dat` 车站分片（可选）。
 6. 解码附加数据：`routes.dat`（线路 + 车次经由，key 是 `sp.dat` 的内部编号）、
-   `jlb.dat`（交路 / 编组 / 餐车，企业名来自 `extra.dat`）。缺失或损坏只提示、不中断。
-7. 导出：默认写 `llt-timetable.sqlite`，`--csv` 时写 CSV（3 张主表 + 经由 / 交路 / 餐车）。
+   `jlb.dat`（交路 / 编组 / 餐车，企业名来自 `extra.dat`）、`sn.dat`（同城车站）、
+   `xw.dat`（途中改车次号，写进 `stops.display_train`）、
+   `plat.dat`（站台 / 出站口，写进 `stops.platform`）。缺失或损坏只提示、不中断。
+7. 导出：默认写 `llt-timetable.sqlite`，`--csv` 时写 CSV（3 张主表 + 经由 / 交路 / 餐车 / 同城）。
 8. 删除临时目录（`--keep-temp` 除外），打印统计与产物路径。
 
 正常结束（包括任何错误返回）都会清理临时目录；只有 Ctrl-C、关窗口等强制中断可能留下
@@ -207,13 +211,14 @@ G5    高速动车    07:40  12:32      4小时52分   1334 km  北京 → 上�
 
 ## 产物
 
-三张数据表与 `tools/decode_llt.py` 完全一致，另外多一张 `meta` 表（版本信息）：
+三张数据表与 `tools/decode_llt.py` 相同（`stops` 再多一列 `platform` 写站台），
+另外多一张 `meta` 表（版本信息）：
 
 | 文件 | 内容 |
 |---|---|
 | `llt-timetable.sqlite` | 主表 + 附加表 + `meta` 与版本 pragma，`gui/` 可直接读取 |
 | `trains.csv` | 车次、车次号、车型、开行日期区间、起终站、里程、天数 |
-| `stops.csv` | 停站：车次、站序、站名、里程、到/发、停留、第几天 |
+| `stops.csv` | 停站：车次、显示车次、站序、站名、里程、到/发、停留、第几天、站台 |
 | `stations.csv` | 车站及 `sN.dat` 里的车次数 |
 | `train_routes.csv` | 车次经由：车次、点序、站名、线路、累计里程 |
 | `duties.csv` | 交路：日期区间、担当企业、编组、交路串、拆段 |
@@ -269,7 +274,7 @@ WHERE g.is_city_node = 1 AND g.group_name = '成都' ORDER BY m.seq;
 SQLite 用 bundled SQLite 写入：先写同目录的临时文件，成功后再改名，避免留下半个库；
 若目标文件被占用（例如 `llt-gui` 正开着）会给出明确提示。
 
-CSV 与 Python 版逐字节相同：UTF-8 **带 BOM**、CRLF 行尾、字段按需加引号。
+CSV 与 Python 版的 BOM / 行尾 / 引号规则相同；`stops.csv` 比 Python 版多一列 `platform`。
 
 ## 数据版本与时间
 
@@ -289,7 +294,7 @@ CSV 与 Python 版逐字节相同：UTF-8 **带 BOM**、CRLF 行尾、字段按�
 
 | key | 含义 |
 |---|---|
-| `schema_version` | 表结构版本（当前 1） |
+| `schema_version` | 表结构版本（当前 5） |
 | `generator` | 生成工具，如 `llt 0.1.0` |
 | `data_version` / `data_date` | `ver.txt` 原文 / `2026-11-08` |
 | `built_at` | 本库生成时间（UTC，RFC3339，精确到秒） |
@@ -297,6 +302,8 @@ CSV 与 Python 版逐字节相同：UTF-8 **带 BOM**、CRLF 行尾、字段按�
 | `source_last_modified` / `etag` | 仅下载时存在，来自 HTTP 响应头 |
 | `archive_bytes` | 数据包字节数 |
 | `station_count` / `train_count` / `stop_count` | 行数，便于快速校验 |
+| `platform_record_count` | `plat.dat` 的记录数（97,394） |
+| `train_change_count` | 有分段的车次数（`xw.dat`，4,562） |
 
 ```sql
 PRAGMA user_version;                               -- 20261108

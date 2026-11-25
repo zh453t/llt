@@ -211,10 +211,19 @@ fn stops(args: &StopsArgs) -> Result<()> {
         summary.total_km,
         date_window(summary.date_from, summary.date_to),
     );
-    let mut table = Table::new(&["序", "车站", "到达", "发车", "停留(分)", "里程", "第几天"]);
+    // 有车次变化 / 站台数据时才加列，老库的输出保持原样。
+    let show_display = detail
+        .stops
+        .iter()
+        .any(|stop| stop.display_train != summary.code);
+    let show_platform = detail.stops.iter().any(|stop| !stop.platform.is_empty());
+    let mut table = Table::new(&stop_header(show_display, show_platform));
     for (position, stop) in detail.stops.iter().enumerate() {
-        table.push(vec![
-            (position + 1).to_string(),
+        let mut row = vec![(position + 1).to_string()];
+        if show_display {
+            row.push(stop.display_train.clone());
+        }
+        row.extend([
             stop.station.clone(),
             stop.arrive.clone(),
             stop.depart.clone(),
@@ -222,6 +231,10 @@ fn stops(args: &StopsArgs) -> Result<()> {
             format!("{} km", stop.km),
             format!("第 {} 天", stop.day),
         ]);
+        if show_platform {
+            row.push(stop.platform.clone());
+        }
+        table.push(row);
     }
     table.print();
     print_details_for(&db, summary, None, true);
@@ -229,6 +242,19 @@ fn stops(args: &StopsArgs) -> Result<()> {
 }
 
 // ---------------------------------------------------------------- 车站
+
+/// 停站表的列：有车次变化 / 站台数据时才加列，老库的输出保持原样。
+fn stop_header(display: bool, platform: bool) -> Vec<&'static str> {
+    let mut header = vec!["序"];
+    if display {
+        header.push("车次");
+    }
+    header.extend(["车站", "到达", "发车", "停留(分)", "里程", "第几天"]);
+    if platform {
+        header.push("站台");
+    }
+    header
+}
 
 fn station(args: &StationArgs) -> Result<()> {
     let ctx = Ctx::new(&args.opts)?;
@@ -863,6 +889,8 @@ fn stop_json(stop: &Stop) -> Value {
     json!({
         "seq": stop.seq,
         "station": stop.station,
+        "display_train": stop.display_train,
+        "platform": stop.platform,
         "arrive": stop.arrive,
         "depart": stop.depart,
         "dwell_min": stop.dwell_min,

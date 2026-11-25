@@ -23,11 +23,13 @@ pub mod export;
 pub mod extras;
 pub mod format;
 pub mod local;
+pub mod platform;
 pub mod progress;
 pub mod routes;
 pub mod samecity;
 pub mod spdata;
 pub mod update;
+pub mod xw;
 
 pub use build::{Options, Report, build};
 pub use check::{Decision, decide};

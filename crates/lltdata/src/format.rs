@@ -108,6 +108,12 @@ impl<'a> Reader<'a> {
             .map_err(|_| anyhow::anyhow!("{what} 损坏：不是合法 UTF-8"))
     }
 
+    /// `u32` 大端（`plat.dat` 的车次 / 车站下标用它）。
+    pub fn u32(&mut self, what: &str) -> Result<u32> {
+        let slice = self.take(4, what)?;
+        Ok(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
+    }
+
     /// `int32` 大端。
     pub fn i32(&mut self, what: &str) -> Result<i64> {
         let slice = self.take(4, what)?;

@@ -62,6 +62,12 @@ fn print_report(report: &Report) {
             stats.same_city_groups, stats.same_city_stations, stats.tele_aliases
         );
     }
+    if stats.platform_stops > 0 || stats.train_changes > 0 {
+        println!(
+            "站台 {} 站   车次变化 {} 趟",
+            stats.platform_stops, stats.train_changes
+        );
+    }
     println!("sqlite  {}", describe(&report.output));
 }
 

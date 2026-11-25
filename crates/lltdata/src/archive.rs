@@ -18,8 +18,9 @@ const REQUIRED: [&str; 22] = [
     "t16.dat", "t17.dat", "t18.dat", "t19.dat",
 ];
 
-/// 可选分片：`sN.dat` 影响车站车次数；其余是经由 / 交路 / 餐车 / 开行周期等附加数据。
-const OPTIONAL: [&str; 17] = [
+/// 可选分片：`sN.dat` 影响车站车次数；其余是经由 / 交路 / 餐车 / 开行周期 /
+/// 站台 / 车次变化等附加数据。
+const OPTIONAL: [&str; 19] = [
     "s0.dat",
     "s1.dat",
     "s2.dat",
@@ -38,6 +39,9 @@ const OPTIONAL: [&str; 17] = [
     "sn.dat",
     // 开行周期表：每行「周期 掩码」，车次头里的 ruleIndex 就是它的行号。
     "t.rule",
+    // 站台 / 出站口提示；车次变化（途中改车次号）。
+    "plat.dat",
+    "xw.dat",
 ];
 
 /// 数据分片所在目录，文件名大小写不敏感。

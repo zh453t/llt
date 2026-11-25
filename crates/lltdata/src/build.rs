@@ -72,6 +72,10 @@ pub struct Stats {
     pub same_city_groups: usize,
     pub same_city_stations: usize,
     pub tele_aliases: usize,
+    /// 有站台信息的停站条数（`plat.dat`）。
+    pub platform_stops: usize,
+    /// 途中改用车次号的车次数（`xw.dat` 里有分段的记录）。
+    pub train_changes: usize,
 }
 
 /// 构建结果。
@@ -261,10 +265,11 @@ pub fn build(opts: &Options, progress: &dyn Progress) -> Result<Report> {
     }
 
     progress.note("解码…");
-    let data = decode::load(&shards)?;
+    let mut data = decode::load(&shards)?;
 
-    // 经由 / 交路属于增强信息，缺失只提示，不影响主表。
+    // 经由 / 交路 / 站台 / 车次变化属于增强信息，缺失只提示，不影响主表。
     let extras = Extras::load(&shards, &data.train_codes, &data.stations);
+    extras.annotate_stops(&mut data.trains);
     notes.extend(data.notes.iter().cloned());
     notes.extend(extras.notes.iter().cloned());
 
@@ -279,6 +284,13 @@ pub fn build(opts: &Options, progress: &dyn Progress) -> Result<Report> {
         same_city_groups: extras.same_city_group_count(),
         same_city_stations: extras.same_city_covered(),
         tele_aliases: extras.tele_alias_count(),
+        platform_stops: data
+            .trains
+            .iter()
+            .flat_map(|train| &train.stops)
+            .filter(|stop| !stop.platform.is_empty())
+            .count(),
+        train_changes: extras.train_change_count(),
     };
 
     let output = if opts.csv {

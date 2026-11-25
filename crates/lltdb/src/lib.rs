@@ -69,6 +69,10 @@ pub struct TrainSummary {
 pub struct Stop {
     pub seq: i64,
     pub station: String,
+    /// 这一站显示的车次号（车次变化之后的写法）；老库没有该列时为车次名的第一段。
+    pub display_train: String,
+    /// 站台 / 出站口提示（`plat.dat`）；没有数据时为空字符串。
+    pub platform: String,
     pub arrive: String,
     pub depart: String,
     pub dwell_min: i64,
@@ -168,6 +172,8 @@ pub struct Db {
     conn: Connection,
     /// 车次列清单：老库没有 `rule_index` 列时换成 `NULL` 占位。
     train_columns: &'static str,
+    /// 停站列清单：`display_train` / `platform` 依库里有哪几列逐个换。
+    stop_columns: String,
     /// 车站 / 站站查询里取 `rule_index` 的那一段，同上。
     rule_column: &'static str,
 }
@@ -209,9 +215,26 @@ impl Db {
             TRAIN_COLUMNS_LEGACY
         };
         let rule_column = if has_rule { "t.rule_index" } else { "NULL" };
+
+        // 停站的两个新列是分开加的：`tools/decode_llt.py` 的老库有 `display_train`
+        // 但没有 `platform`，所以逐列探测。
+        let stop_columns = format!(
+            "seq, station, arrive, depart, dwell_min, km, day, arrive_min, depart_min, {}, {}",
+            if has_column(&conn, "stops", "display_train") {
+                "display_train"
+            } else {
+                "NULL"
+            },
+            if has_column(&conn, "stops", "platform") {
+                "platform"
+            } else {
+                "NULL"
+            },
+        );
         Ok(Self {
             conn,
             train_columns,
+            stop_columns,
             rule_column,
         })
     }
@@ -541,12 +564,11 @@ impl Db {
             map_train,
         )?;
 
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT seq, station, arrive, depart, dwell_min, km, day,
-                    arrive_min, depart_min
-             FROM stops WHERE train_index = ?1 ORDER BY seq",
-        )?;
-        let stops = stmt
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {} FROM stops WHERE train_index = ?1 ORDER BY seq",
+            self.stop_columns
+        ))?;
+        let mut stops = stmt
             .query_map([train_index], |row| {
                 Ok(Stop {
                     seq: int(row, 0)?,
@@ -558,9 +580,21 @@ impl Db {
                     day: int(row, 6)?,
                     arrive_min: int(row, 7)?,
                     depart_min: int(row, 8)?,
+                    display_train: text(row, 9)?,
+                    platform: text(row, 10)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        // 老库没有 `display_train`：用 `/` 前的第一段兜底（无车次变化时的显示值）。
+        if stops.iter().any(|stop| stop.display_train.is_empty()) {
+            let shown = summary.code.split('/').next().unwrap_or(&summary.code);
+            for stop in &mut stops {
+                if stop.display_train.is_empty() {
+                    stop.display_train = shown.to_owned();
+                }
+            }
+        }
 
         Ok(TrainDetail { summary, stops })
     }
@@ -584,6 +618,12 @@ fn map_train(row: &Row<'_>) -> rusqlite::Result<TrainSummary> {
 
 fn text(row: &Row<'_>, index: usize) -> rusqlite::Result<String> {
     Ok(row.get::<_, Option<String>>(index)?.unwrap_or_default())
+}
+
+/// 表里有没有这一列（老库用）。
+fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
+    conn.prepare(&format!("SELECT {column} FROM {table} LIMIT 1"))
+        .is_ok()
 }
 
 fn int(row: &Row<'_>, index: usize) -> rusqlite::Result<i64> {
@@ -665,6 +705,45 @@ mod tests {
         let (od, _) = db.od_search_multi(&[0], &[1], 10).unwrap();
         assert_eq!(od.len(), 1);
         assert_eq!(od[0].rule_index, None);
+        // 停站也没有 display_train / platform 列：显示车次退回车次名第一段，站台为空。
+        let detail = db.train_detail(7).unwrap();
+        assert_eq!(detail.stops.len(), 2);
+        assert_eq!(detail.stops[0].display_train, "K54");
+        assert_eq!(detail.stops[0].platform, "");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn python_db_with_display_train_but_no_platform_still_queries() {
+        // `tools/decode_llt.py` 的老库有 display_train 但没 platform：两列要分开探测。
+        let path = std::env::temp_dir().join(format!(
+            "llt-python-legacy-test-{}-{:?}.sqlite",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE stations (station_index INTEGER PRIMARY KEY, station TEXT NOT NULL);
+                 CREATE TABLE trains (train_index INTEGER PRIMARY KEY, train TEXT NOT NULL,
+                     train_no TEXT, type TEXT, date_from INTEGER, date_to INTEGER,
+                     total_km INTEGER, days INTEGER, first_station TEXT, last_station TEXT);
+                 CREATE TABLE stops (train_index INTEGER, train TEXT, display_train TEXT, seq INTEGER,
+                     station_index INTEGER, station TEXT, km INTEGER, arrive TEXT, depart TEXT,
+                     dwell_min INTEGER, day INTEGER, arrive_min INTEGER, depart_min INTEGER);
+                 INSERT INTO stations VALUES (0, '北京');
+                 INSERT INTO trains VALUES (7, 'Z322/Z323', '322', '直达特快', 20260101, 20261231,
+                                            1000, 1, '北京', '北京');
+                 INSERT INTO stops VALUES (7, 'Z322/Z323', 'Z322', 1, 0, '北京', 0, '08:00',
+                                           '08:00', 0, 1, 480, 480);",
+            )
+            .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let detail = db.train_detail(7).unwrap();
+        assert_eq!(detail.stops[0].display_train, "Z322");
+        assert_eq!(detail.stops[0].platform, "");
         let _ = std::fs::remove_file(&path);
     }
 

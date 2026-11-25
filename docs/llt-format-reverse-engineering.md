@@ -59,6 +59,33 @@ S2 int32 n;  n×{i32 车次编号, i32 起, i32 止, 1B len+UTF8 餐车}
 命中规则是把每段拆开后用「段首车次号 == 查询车次」匹配，并用 `起<=查询日<=止` 过滤。
 企业 id 指向 `extra.dat` 首段的企业/担当段表（373 条）。
 
+**`plat.dat`**（`PlatformMgr`，990,087 B）：车次 × 车站 → 站台 / 出站口提示
+
+```
+u32 count                              记录条数
+count × { u32 trainIndex; u32 stationIndex; 1B len; len 字节 UTF-8 站台文本 }
+```
+
+- map 的 key 是 `"trainIndex_stationIndex"`，同键后者覆盖前者（实测无重复键）
+- 详情页「出站口/站台」列直接取它（`ETicketInfoFragment.tvJpk`）；`QueryTicketCheck` 里
+  在线检票口失败时用它兜底，成功后写回本地
+- 20261127 实测：97,394 条，覆盖 11,906 / 15,151 个车次（79%），
+  合并进 `stops.platform` 后 97,451 / 143,397 条停站（68%）有站台值
+- 取值多为纯数字（"1"…"19"），少数为文本（如"出站口/站台"）
+
+**`xw.dat`**（`DataMgr`，107,164 B）：车次变化（同一趟车途中改车次号）
+
+```
+base255 n                            记录条数
+n × { base255 trainIndex; base255 v; 1B k; k × { base255 km; 1B nameIdx } }
+```
+
+- `trainIndex` 与 `t.i` 下标一致；`v` 观察值多为 0（未使用）
+- 分段按里程升序，`nameIdx` 指向 `t.i` 车次名按 `/` 拆开后的第几段
+- 判定（`QueryBase.OooO0o`）：取最后一个 `km <= 停站累计里程` 的分段；`k=0` 时恒为 `parts[0]`；
+  `nameIdx` 越界（本数据 2 例）时回落到 `parts[0]`
+- 实测：15,019 条记录、4,562 条有分段、10,689 个分段；切换里程 6,072/6,127 落在某个停站上
+
 **`sn.dat`**（`FuzzyStationMgr`，9,128 B）：同城车站 / 站名别名 / 城市名节点
 
 ```
@@ -186,6 +213,11 @@ python tools/decode_routes.py --dump out/timetable/routes
 python tools/decode_sn.py 北京               # sn.dat：同城车站
 python tools/decode_sn.py --dump out/timetable/sn
 python tools/check_update.py                   # 比对线上 android.ver 与本地 ver.txt
+python tools/decode_xw.py Z322/Z323            # xw.dat：车次变化
+python tools/decode_xw.py --dump out/timetable/xw
+python tools/decode_plat.py 1461               # plat.dat：逐站站台
+python tools/decode_plat.py --dump out/timetable/plat
+python tools/decode_plat.py --sqlite out/timetable/llt-timetable.sqlite   # 合并进 stops.platform
 ```
 
 Rust 版（`cli/`）把上述全部内容一次写入同一个 SQLite：
@@ -199,8 +231,11 @@ cargo run -p llt --release -- query station 北京    # 车站时刻表 + 同城
 
 对应的附加表为 `lines` / `line_stations`（线路）、`train_routes`（车次经由展开）、
 `duties` / `duty_segments`（交路）、`dining_cars`（餐车）、
-`city_nodes` / `same_city_groups` / `same_city_members`（同城车站）、`tele_aliases`（电报码），
-解析实现见 `cli/src/routes.rs`、`cli/src/duty.rs`、`cli/src/spdata.rs`、`cli/src/samecity.rs`。
+`city_nodes` / `same_city_groups` / `same_city_members`（同城车站）、`tele_aliases`（电报码）；
+`stops` 表另带 `display_train`（`xw.dat` 车次变化后该站显示的车次）与 `platform`
+（`plat.dat` 站台 / 出站口）两列，`query stops` 会直接展示。
+解析实现见 `crates/lltdata/src/routes.rs`、`duty.rs`、`spdata.rs`、`samecity.rs`、
+`xw.rs`、`platform.rs`。
 
 ```python
 b255 = lambda b, o: (b[o] & 0xFF) * 255 + (b[o+1] & 0xFF)
@@ -314,6 +349,39 @@ t.rule 每行 "<周期 j> <位掩码 mask>"，第 k 行即 ruleIndex=k（131 行
 验证：`G531` = ruleIndex 89 → `7 15`（位 0..3）；起日 2026-07-03 是**周五**，故开行日 = 五六日一。
 App 中 11/2（周一）有 G531、11/3（周二）无 → 与「相对起日」一致；若按「位=星期」解释应为一~四开行，与 App 矛盾。
 
+
+### plat.dat：站台实测
+
+`1461`（北京→上海）逐站站台：北京 13、天津西 19、沧州 3、济南 8、兖州 5、徐州 8、蚌埠 1、
+南京 7、常州 5、无锡 5、苏州 4、上海 12（中间小站多为空，只有主要停靠站有值）。
+`G549`：北京南 9、沧州西 2、济南西 6、蚌埠南 6、滁州 1、南京南 4、常州北 4、苏州北 3、上海虹桥 14。
+
+### xw.dat：车次变化实测（Z322 → Z323）
+
+`t.i` 里写作 `Z322/Z323`，`xw.dat` 给出分段点：
+
+```
+Z322/Z323  0 km → Z322      400 km → Z323
+```
+
+| 序 | 车站 | 里程 | 到-发 | 显示车次 |
+|---|---|---|---|---|
+| 1 | 成都龙泉驿 | 0 | 19:01–19:01 | Z322 |
+| 2 | 成都西 | 68 | 20:18–20:46 | Z322 |
+| 3 | **广元** | **400** | 02:04–02:38 | **Z323** ← 切换 |
+| 4 | 兰州 | 909 | 08:20–08:40 | Z323 |
+| … | | | | |
+| 8 | 拉萨 | 3096 | 07:24–07:24 | Z323 |
+
+与界面观察一致（Z322 次在广元切换为 Z323）。注意两点：
+
+1. **`A/B` 的书写顺序不等于运行顺序**：`4167/4170` 的首段 `nameIdx=1`，
+   即始发（海拉尔，0 km）显示 4170，到牙克石（82 km）才变成 4167。首段 `nameIdx` 分布为 0:2415 / 1:2147。
+2. 分段点必须按**累计里程**比对，而不是站序；55 个分段点不落在任何停站里程上（多为线路改经由/不办客的通过点）。
+
+复刻脚本：`python tools/decode_xw.py Z322/Z323`；`llt build` 的 `stops` 表写了
+`display_train` 列（62,306 条停站的显示车次与 `train` 不同、4,623 个车次头），
+`llt query stops` 在这一列与车次名不同时才加一列「车次」。
 
 ### 数据库更新推送：只有一条 HTTP 接口
 

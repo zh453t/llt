@@ -1,7 +1,7 @@
 //! 导出：SQLite（默认）或 CSV（`--csv`）。
 //!
-//! `stations` / `trains` / `stops` 三张表的表结构与列名和 `tools/decode_llt.py`
-//! 完全一致，`gui/` 可以直接读取；此外还会写入附加表：
+//! `stations` / `trains` / `stops` 三张表与 `tools/decode_llt.py` 一致（`stops` 另多
+//! `platform` 列，写站台），另外还会写入附加表：
 //!
 //! ```sql
 //! meta         (key, value)
@@ -33,8 +33,9 @@ use crate::samecity;
 pub const SQLITE_FILE: &str = "llt-timetable.sqlite";
 
 /// `meta.schema_version`，表结构变化时 +1
-/// （2 = 经由 / 交路 / 餐车；3 = 经由点标注是否为车站；4 = 同城车站）。
-pub const SCHEMA_VERSION: i64 = 4;
+/// （2 = 经由 / 交路 / 餐车；3 = 经由点标注是否为车站；4 = 同城车站；
+/// 5 = 停站增加 `display_train` / `platform`）。
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// SQLite `application_id`：`"LLT"` + 版本 1，用于识别本工具生成的库。
 const APPLICATION_ID: i64 = 0x4C4C_5401;
@@ -118,9 +119,10 @@ CREATE TABLE trains (train_index INTEGER PRIMARY KEY, train TEXT NOT NULL,
 -- 开行周期（t.rule）：period 天一轮，mask 的第 k 位为 1 表示第 k 天开行。
 CREATE TABLE train_rules (rule_index INTEGER PRIMARY KEY,
     period INTEGER NOT NULL, mask INTEGER NOT NULL);
-CREATE TABLE stops (train_index INTEGER, train TEXT, seq INTEGER, station_index INTEGER,
-    station TEXT, km INTEGER, arrive TEXT, depart TEXT, dwell_min INTEGER, day INTEGER,
-    arrive_min INTEGER, depart_min INTEGER,
+CREATE TABLE stops (train_index INTEGER, train TEXT, display_train TEXT, seq INTEGER,
+    station_index INTEGER, station TEXT, km INTEGER, arrive TEXT, depart TEXT,
+    dwell_min INTEGER, day INTEGER, arrive_min INTEGER, depart_min INTEGER,
+    platform TEXT,
     PRIMARY KEY (train_index, seq));
 CREATE INDEX stops_station ON stops(station_index);
 CREATE INDEX stops_train ON stops(train_index, seq);
@@ -224,6 +226,7 @@ pub fn write_csvs(
     let mut csv = CsvFile::create(&dir.join(STOPS_CSV))?;
     csv.header(&[
         "train",
+        "display_train",
         "seq",
         "station",
         "station_index",
@@ -232,11 +235,13 @@ pub fn write_csvs(
         "depart",
         "dwell_min",
         "day",
+        "platform",
     ])?;
     for train in &data.trains {
         for (index, stop) in train.stops.iter().enumerate() {
             csv.record(vec![
                 train.code.clone(),
+                stop.display_train.clone(),
                 (index + 1).to_string(),
                 stop.station.clone(),
                 stop.station_index.to_string(),
@@ -245,6 +250,7 @@ pub fn write_csvs(
                 stop.depart.clone(),
                 stop.dwell.to_string(),
                 stop.day.to_string(),
+                stop.platform.clone(),
             ])?;
         }
     }
@@ -405,6 +411,8 @@ fn write_meta_json(dir: &Path, data: &Dataset, extras: &Extras, meta: &Meta) -> 
         "route_point_count": extras.route_point_count(),
         "duty_count": extras.duty_count(),
         "same_city_group_count": extras.same_city_group_count(),
+        "platform_record_count": extras.platform_record_count(),
+        "train_change_count": extras.train_change_count(),
     });
     let text = serde_json::to_string_pretty(&value)?;
     std::fs::write(&path, text).with_context(|| format!("无法写入 {}", path.display()))?;
@@ -462,9 +470,7 @@ pub fn replace_file(tmp: &Path, target: &Path) -> std::io::Result<()> {
             }
         }
     }
-    Err(last.unwrap_or_else(|| {
-        std::io::Error::other(format!("无法替换 {}", target.display()))
-    }))
+    Err(last.unwrap_or_else(|| std::io::Error::other(format!("无法替换 {}", target.display()))))
 }
 
 fn write_sqlite_at(path: &Path, data: &Dataset, extras: &Extras, meta: &Meta) -> Result<()> {
@@ -531,13 +537,14 @@ fn write_sqlite_at(path: &Path, data: &Dataset, extras: &Extras, meta: &Meta) ->
 
     {
         let mut insert = tx.prepare(
-            "INSERT INTO stops VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO stops VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         )?;
         for train in &data.trains {
             for (index, stop) in train.stops.iter().enumerate() {
                 insert.execute(params![
                     i64::from(train.index),
                     train.code,
+                    stop.display_train,
                     (index + 1) as i64,
                     i64::from(stop.station_index),
                     stop.station,
@@ -548,6 +555,7 @@ fn write_sqlite_at(path: &Path, data: &Dataset, extras: &Extras, meta: &Meta) ->
                     i64::from(stop.day),
                     i64::from(stop.arrive_min),
                     i64::from(stop.depart_min),
+                    stop.platform,
                 ])?;
             }
         }
@@ -720,6 +728,14 @@ fn meta_rows(data: &Dataset, extras: &Extras, meta: &Meta) -> Vec<(&'static str,
             extras.same_city_group_count().to_string(),
         ),
         ("tele_alias_count", extras.tele_alias_count().to_string()),
+        (
+            "platform_record_count",
+            extras.platform_record_count().to_string(),
+        ),
+        (
+            "train_change_count",
+            extras.train_change_count().to_string(),
+        ),
     ];
     if let Some(version) = &meta.data_version {
         rows.push(("data_version", version.clone()));
@@ -801,6 +817,12 @@ mod tests {
         let stop = |index: u32, name: &str, arrive: &str, depart: &str| Stop {
             station_index: index,
             station: name.to_owned(),
+            display_train: "G1".to_owned(),
+            platform: if index == 0 {
+                "3".to_owned()
+            } else {
+                String::new()
+            },
             km: index * 100,
             arrive: arrive.to_owned(),
             depart: depart.to_owned(),
@@ -856,6 +878,8 @@ mod tests {
         }]);
         Extras {
             rules: Vec::new(),
+            changes: None,
+            platforms: None,
             routes: Some(routes),
             duties: Some(Duties {
                 items: vec![Duty {
@@ -977,7 +1001,10 @@ mod tests {
         );
         assert_eq!(meta_value(&path, "station_count").as_deref(), Some("2"));
         assert_eq!(meta_value(&path, "stop_count").as_deref(), Some("2"));
-        assert_eq!(meta_value(&path, "schema_version").as_deref(), Some("4"));
+        assert_eq!(
+            meta_value(&path, "schema_version").as_deref(),
+            Some(SCHEMA_VERSION.to_string().as_str())
+        );
         assert_eq!(meta_value(&path, "route_point_count").as_deref(), Some("2"));
         assert_eq!(
             meta_value(&path, "route_point_station_count").as_deref(),
