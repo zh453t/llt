@@ -109,10 +109,11 @@ pub struct ColumnSettings {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ColumnWidth {
-    /// 记下宽度时的可视宽度（`clip_rect` 宽度 × 2，与 `app::column_viewport` 同一口径）。
+    /// 记下宽度时的布局宽度（逻辑点 ×2，与 `app::column_viewport_of` 同一口径）。
     ///
-    /// 窗口/面板尺寸变了就不再套用旧列宽：按旧宽度排出来的表在新宽度下要么填不满、
-    /// 要么撑出横向滚动条，不如重新自适应一遍。
+    /// 结果表用的是「不含右侧临时面板」的宽度（`app::table_layout_width`）：打开 / 关闭详情
+    /// 不会让它们重排，下次启动也照旧套用。窗口尺寸真变了就不再套旧列宽：按旧宽度排出来的表
+    /// 在新宽度下要么填不满、要么撑出横向滚动条，不如重新自适应一遍。
     pub viewport: i32,
     /// 每列宽度（逻辑点，取整），与那张表当前的列一一对应。
     pub widths: Vec<u16>,

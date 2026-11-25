@@ -88,6 +88,14 @@
   不能用每帧的 `pointer.delta()` 累加——触摸屏上按住的头 0.4 秒、以及松手那一帧的位移
   都会丢，列宽比手指走过的距离少一截。并且在**画表之前**先调 `apply_resize_drag`
   把宽度落进去，否则列宽晚一帧生效，快速滑动时分隔线会明显落后于手指。
+- **结果表骨架只有一份**：车次 / 车站 / 站站三张结果表都走 `result_table`（`ResultRows` 给出行数、
+  开行分界、选中、行→车次下标，闭包只画一格），列集合用 `table_specs`。新增结果表直接调这两个，
+  不要再把「`scrollable_table` + 列宽 + 表头 + 拖动」抄一遍（以前三份各抄一遍，改一处漏两处）。
+  停站表在详情里，行高/表头高都不同，仍走自己的 `stops_table_ui`。
+- **自适应列宽按「布局宽度」算**（`table_layout_width` = 当前可用宽度 + 右侧临时面板占的宽度，
+  `body` 铺完 `detail_right` / `via_right` 后记进 `ui.data`）：打开、关闭详情、拖详情分隔线
+  都只让结果表多出横向滚动，列集合与列宽都不变，三张表表现一致；只有窗口尺寸真变了
+  才重排（`VIEWPORT_SLACK`）。停站表在详情里，按自己的可用宽度走 `column_viewport`。
 - **列宽记忆**：四张表（`od_results` / `train_results` / `station_board` / `train_stops`）的
   宽度工作副本在 egui 界面状态里（`(salt, "widths")`），`persist` 时读出来取整写进
   `columns.widths.<表>`，启动时 `seed_column_widths` 塞回去。列序变了按列名把宽度重排

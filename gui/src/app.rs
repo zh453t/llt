@@ -1329,102 +1329,38 @@ impl LltApp {
         custom: Option<&[columns::TrainColumn]>,
     ) -> Option<i64> {
         use columns::TrainColumn as Col;
-        let specs: Vec<columns::Spec<Col>> = match custom {
-            Some(picked) => picked.iter().map(|column| column.spec()).collect(),
-            None => Col::auto(ui.available_width())
-                .iter()
-                .map(|column| column.spec())
-                .collect(),
-        };
-        let pitch = theme::list_row_height() + ui.spacing().item_spacing.y;
-        let height = theme::list_header_height() + rows.len() as f32 * pitch + theme::GAP_S;
-        let mut clicked = None;
-        scrollable_table(
+        let specs = table_specs(custom, Col::auto, Col::spec, table_layout_width(ui));
+        result_table(
             ui,
             salt,
-            height,
-            theme::list_header_height(),
-            |ui, content_width| {
-                let (computed, _) =
-                    column_widths(&specs, content_width, ui.spacing().item_spacing.x);
-                let mut widths = table_widths(ui, salt, &specs, computed, Col::key);
-                apply_resize_drag(ui, salt, &specs, &mut widths, Col::resizable);
-                let active = table_active_column(ui, salt);
-                let table = exact_columns(
-                    TableBuilder::new(ui)
-                        .id_salt(salt)
-                        .striped(true)
-                        .sense(Sense::click())
-                        .drag_to_scroll(egui::scroll_area::DragScroll::Never)
-                        .auto_shrink([false, false])
-                        .cell_layout(cell_layout()),
-                    &widths,
-                );
-                // 单元格右边界直接取自表头实际画出来的位置：滚动、内边距都由它兜底，
-                // 不用自己拿宽度累加（累加对不上只会在滚动时偏几十点）。
-                let mut edges: Vec<f32> = Vec::with_capacity(specs.len());
-                let mut cells: Vec<egui::Rect> = Vec::with_capacity(specs.len());
-                let mut first_row: Option<egui::Rect> = None;
-                table
-                    .header(theme::list_header_height(), |mut header| {
-                        for (index, spec) in specs.iter().enumerate() {
-                            header.col(|ui| {
-                                edges.push(ui.max_rect().right());
-                                cells.push(ui.max_rect());
-                                column_head(ui, spec, active == Some(index));
-                            });
-                        }
-                    })
-                    .body(|body| {
-                        body.rows(theme::list_row_height(), rows.len(), |mut row| {
-                            let train = rows[row.index()];
-                            let running = row.index() < running_count;
-                            row.set_selected(selected == Some(train.index));
-                            if running_count > 0 && row.index() == running_count {
-                                row.set_overline(true);
-                            }
-                            let window = date_window(train.date_from, train.date_to);
-                            for spec in &specs {
-                                row.col(|ui| match spec.column {
-                                    Col::Status => status_cell(ui, running),
-                                    Col::Code => {
-                                        train_code_cell(ui, &train.code, Some(window.as_str()))
-                                    }
-                                    Col::Kind => {
-                                        ui.add(egui::Label::new(&train.kind).truncate());
-                                    }
-                                    Col::Route => route_cell(ui, &train.first, &train.last),
-                                    Col::Km => right_label(ui, format!("{} km", train.total_km)),
-                                    Col::Days => right_label(ui, format!("{} 天", train.days)),
-                                    Col::Date => {
-                                        ui.label(meta(window.clone()));
-                                    }
-                                });
-                            }
-                            if row.index() == 0 {
-                                first_row = Some(row.response().rect);
-                            }
-                            if row.response().clicked() {
-                                clicked = Some(train.index);
-                            }
-                        });
-                    });
-                table_header_drag(ui, salt, &specs, &cells, Col::key, Col::resizable);
-                table_resize_handles(
-                    ui,
-                    salt,
-                    &specs,
-                    &mut widths,
-                    TableGeometry {
-                        edges: &edges,
-                        first_row,
-                        header_height: theme::list_header_height(),
-                    },
-                    Col::resizable,
-                );
+            &specs,
+            Col::key,
+            Col::resizable,
+            ResultRows {
+                count: rows.len(),
+                running: running_count,
+                selected,
+                id: &|index| rows[index].index,
             },
-        );
-        clicked
+            |row, column, index| {
+                let train = rows[index];
+                let running = index < running_count;
+                let window = date_window(train.date_from, train.date_to);
+                row.col(|ui| match column {
+                    Col::Status => status_cell(ui, running),
+                    Col::Code => train_code_cell(ui, &train.code, Some(window.as_str())),
+                    Col::Kind => {
+                        ui.add(egui::Label::new(&train.kind).truncate());
+                    }
+                    Col::Route => route_cell(ui, &train.first, &train.last),
+                    Col::Km => right_label(ui, format!("{} km", train.total_km)),
+                    Col::Days => right_label(ui, format!("{} 天", train.days)),
+                    Col::Date => {
+                        ui.label(meta(window.clone()));
+                    }
+                });
+            },
+        )
     }
 
     fn station_ui(&mut self, ui: &mut Ui, part: TabPart) {
@@ -1644,104 +1580,45 @@ impl LltApp {
         custom: Option<&[columns::StationColumn]>,
     ) -> Option<i64> {
         use columns::StationColumn as Col;
-        let specs: Vec<columns::Spec<Col>> = match custom {
-            Some(picked) => picked.iter().map(|column| column.spec()).collect(),
-            None => Col::auto(ui.available_width(), show_station)
-                .iter()
-                .map(|column| column.spec())
-                .collect(),
-        };
-        let pitch = theme::list_row_height() + ui.spacing().item_spacing.y;
-        let height = theme::list_header_height() + rows.len() as f32 * pitch + theme::GAP_S;
-        let mut clicked = None;
-        scrollable_table(
+        let specs = table_specs(
+            custom,
+            |width| Col::auto(width, show_station),
+            Col::spec,
+            table_layout_width(ui),
+        );
+        result_table(
             ui,
             salt,
-            height,
-            theme::list_header_height(),
-            |ui, content_width| {
-                let (computed, _) =
-                    column_widths(&specs, content_width, ui.spacing().item_spacing.x);
-                let mut widths = table_widths(ui, salt, &specs, computed, Col::key);
-                apply_resize_drag(ui, salt, &specs, &mut widths, Col::resizable);
-                let active = table_active_column(ui, salt);
-                let table = exact_columns(
-                    TableBuilder::new(ui)
-                        .id_salt(salt)
-                        .striped(true)
-                        .sense(Sense::click())
-                        .drag_to_scroll(egui::scroll_area::DragScroll::Never)
-                        .auto_shrink([false, false])
-                        .cell_layout(cell_layout()),
-                    &widths,
-                );
-                // 单元格右边界直接取自表头实际画出来的位置：滚动、内边距都由它兜底，
-                // 不用自己拿宽度累加（累加对不上只会在滚动时偏几十点）。
-                let mut edges: Vec<f32> = Vec::with_capacity(specs.len());
-                let mut cells: Vec<egui::Rect> = Vec::with_capacity(specs.len());
-                let mut first_row: Option<egui::Rect> = None;
-                table
-                    .header(theme::list_header_height(), |mut header| {
-                        for (index, spec) in specs.iter().enumerate() {
-                            header.col(|ui| {
-                                edges.push(ui.max_rect().right());
-                                cells.push(ui.max_rect());
-                                column_head(ui, spec, active == Some(index));
-                            });
-                        }
-                    })
-                    .body(|body| {
-                        body.rows(theme::list_row_height(), rows.len(), |mut row| {
-                            let stop = rows[row.index()];
-                            let running = row.index() < running_count;
-                            row.set_selected(selected == Some(stop.train_index));
-                            if running_count > 0 && row.index() == running_count {
-                                row.set_overline(true);
-                            }
-                            let route = format!("{} → {}", stop.first, stop.last);
-                            let day_offset = stop.day - 1;
-                            for spec in &specs {
-                                row.col(|ui| match spec.column {
-                                    Col::Status => status_cell(ui, running),
-                                    Col::Code => {
-                                        train_code_cell(ui, &stop.code, Some(route.as_str()))
-                                    }
-                                    Col::Station => station_name_cell(ui, &stop.station),
-                                    Col::Arrive => time_cell(ui, &stop.arrive, day_offset),
-                                    Col::Depart => time_cell(ui, &stop.depart, day_offset),
-                                    Col::Dwell => right_label(ui, format!("{} 分", stop.dwell_min)),
-                                    Col::Day => right_label(ui, format!("第 {} 天", stop.day)),
-                                    Col::Km => right_label(ui, format!("{} km", stop.km)),
-                                    Col::Kind => {
-                                        ui.add(egui::Label::new(&stop.kind).truncate());
-                                    }
-                                    Col::Route => route_cell(ui, &stop.first, &stop.last),
-                                });
-                            }
-                            if row.index() == 0 {
-                                first_row = Some(row.response().rect);
-                            }
-                            if row.response().clicked() {
-                                clicked = Some(stop.train_index);
-                            }
-                        });
-                    });
-                table_header_drag(ui, salt, &specs, &cells, Col::key, Col::resizable);
-                table_resize_handles(
-                    ui,
-                    salt,
-                    &specs,
-                    &mut widths,
-                    TableGeometry {
-                        edges: &edges,
-                        first_row,
-                        header_height: theme::list_header_height(),
-                    },
-                    Col::resizable,
-                );
+            &specs,
+            Col::key,
+            Col::resizable,
+            ResultRows {
+                count: rows.len(),
+                running: running_count,
+                selected,
+                id: &|index| rows[index].train_index,
             },
-        );
-        clicked
+            |row, column, index| {
+                let stop = rows[index];
+                let running = index < running_count;
+                let route = format!("{} → {}", stop.first, stop.last);
+                let day_offset = stop.day - 1;
+                row.col(|ui| match column {
+                    Col::Status => status_cell(ui, running),
+                    Col::Code => train_code_cell(ui, &stop.code, Some(route.as_str())),
+                    Col::Station => station_name_cell(ui, &stop.station),
+                    Col::Arrive => time_cell(ui, &stop.arrive, day_offset),
+                    Col::Depart => time_cell(ui, &stop.depart, day_offset),
+                    Col::Dwell => right_label(ui, format!("{} 分", stop.dwell_min)),
+                    Col::Day => right_label(ui, format!("第 {} 天", stop.day)),
+                    Col::Km => right_label(ui, format!("{} km", stop.km)),
+                    Col::Kind => {
+                        ui.add(egui::Label::new(&stop.kind).truncate());
+                    }
+                    Col::Route => route_cell(ui, &stop.first, &stop.last),
+                });
+            },
+        )
     }
 
     fn od_ui(&mut self, ui: &mut Ui, part: TabPart) {
@@ -2055,87 +1932,25 @@ impl LltApp {
         custom: Option<&[columns::OdColumn]>,
     ) -> Option<i64> {
         use columns::OdColumn as Col;
-        let specs: Vec<columns::Spec<Col>> = match custom {
-            Some(picked) => picked.iter().map(|column| column.spec()).collect(),
-            None => Col::auto(ui.available_width())
-                .iter()
-                .map(|column| column.spec())
-                .collect(),
-        };
-        let pitch = theme::list_row_height() + ui.spacing().item_spacing.y;
-        let height = theme::list_header_height() + rows.len() as f32 * pitch + theme::GAP_S;
-        let mut clicked = None;
-        scrollable_table(
+        let specs = table_specs(custom, Col::auto, Col::spec, table_layout_width(ui));
+        result_table(
             ui,
             salt,
-            height,
-            theme::list_header_height(),
-            |ui, content_width| {
-                let (computed, _) =
-                    column_widths(&specs, content_width, ui.spacing().item_spacing.x);
-                let mut widths = table_widths(ui, salt, &specs, computed, Col::key);
-                apply_resize_drag(ui, salt, &specs, &mut widths, Col::resizable);
-                let active = table_active_column(ui, salt);
-                let table = exact_columns(
-                    TableBuilder::new(ui)
-                        .id_salt(salt)
-                        .striped(true)
-                        .sense(Sense::click())
-                        .drag_to_scroll(egui::scroll_area::DragScroll::Never)
-                        .auto_shrink([false, false])
-                        .cell_layout(cell_layout()),
-                    &widths,
-                );
-                // 单元格右边界直接取自表头实际画出来的位置：滚动、内边距都由它兜底，
-                // 不用自己拿宽度累加（累加对不上只会在滚动时偏几十点）。
-                let mut edges: Vec<f32> = Vec::with_capacity(specs.len());
-                let mut cells: Vec<egui::Rect> = Vec::with_capacity(specs.len());
-                let mut first_row: Option<egui::Rect> = None;
-                table
-                    .header(theme::list_header_height(), |mut header| {
-                        for (index, spec) in specs.iter().enumerate() {
-                            header.col(|ui| {
-                                edges.push(ui.max_rect().right());
-                                cells.push(ui.max_rect());
-                                column_head(ui, spec, active == Some(index));
-                            });
-                        }
-                    })
-                    .body(|body| {
-                        body.rows(theme::list_row_height(), rows.len(), |mut row| {
-                            let hit = rows[row.index()];
-                            let running = row.index() < running_count;
-                            row.set_selected(selected == Some(hit.train_index));
-                            if running_count > 0 && row.index() == running_count {
-                                row.set_overline(true);
-                            }
-                            for spec in &specs {
-                                row.col(|ui| od_cell(ui, spec.column, hit, running));
-                            }
-                            if row.index() == 0 {
-                                first_row = Some(row.response().rect);
-                            }
-                            if row.response().clicked() {
-                                clicked = Some(hit.train_index);
-                            }
-                        });
-                    });
-                table_header_drag(ui, salt, &specs, &cells, Col::key, Col::resizable);
-                table_resize_handles(
-                    ui,
-                    salt,
-                    &specs,
-                    &mut widths,
-                    TableGeometry {
-                        edges: &edges,
-                        first_row,
-                        header_height: theme::list_header_height(),
-                    },
-                    Col::resizable,
-                );
+            &specs,
+            Col::key,
+            Col::resizable,
+            ResultRows {
+                count: rows.len(),
+                running: running_count,
+                selected,
+                id: &|index| rows[index].train_index,
             },
-        );
-        clicked
+            |row, column, index| {
+                let hit = rows[index];
+                let running = index < running_count;
+                row.col(|ui| od_cell(ui, column, hit, running));
+            },
+        )
     }
 
     /// `compact` 为真时（窗口窄、详情在底部），改为左右分栏：
@@ -2311,7 +2126,9 @@ impl LltApp {
                         ("train_stops_page", self.detail_gen),
                         stops_height,
                         theme::detail_header_height(),
-                        |ui, content_width| {
+                        |ui| {
+                            // 这一页的停站表要铺满滚动区：内容宽度就是它自己的可用宽度。
+                            let content_width = ui.available_width();
                             stops_table_ui(
                                 ui,
                                 &detail.stops,
@@ -2852,6 +2669,9 @@ impl LltApp {
                 .frame(theme::panel_frame(ui))
                 .show(ui, |ui| self.header(ui));
         }
+        // 右侧的详情栏与经由分栏是**临时**面板：它们占掉的宽度要还给结果表，
+        // 否则每开一次详情，表格就要重新挑列、重新分配列宽。先清零，铺完面板再记。
+        let mut side_panels = 0.0;
         if self.detail.is_some() && !touch_page {
             let available = ui.available_width();
             if available >= WIDE_MIN_WIDTH {
@@ -2861,13 +2681,14 @@ impl LltApp {
                 let via_width = (available * 0.24).clamp(320.0, 400.0);
                 if self.via_side_open && !self.extras.via.is_empty() {
                     if available >= WIDE_MIN_WIDTH + via_width {
-                        egui::Panel::right("via_right")
+                        let shown = egui::Panel::right("via_right")
                             .resizable(true)
                             .default_size(via_width)
                             .min_size(300.0)
                             .max_size(480.0)
                             .frame(theme::detail_frame(ui))
                             .show(ui, |ui| self.via_side_ui(ui));
+                        side_panels += shown.response.rect.width();
                     } else {
                         // 窗口分不出这一块：收起分栏，转成居中弹窗（同窄屏的既有行为）。
                         self.via_side_open = false;
@@ -2876,13 +2697,14 @@ impl LltApp {
                 }
                 // 宽屏：右侧详情栏占窗口宽度的约 36%，仍保证至少 320 点。
                 let detail_width = (available * 0.36).clamp(380.0, 560.0);
-                egui::Panel::right("detail_right")
+                let shown = egui::Panel::right("detail_right")
                     .resizable(true)
                     .default_size(detail_width)
                     .min_size(320.0)
                     .max_size(640.0)
                     .frame(theme::detail_frame(ui))
                     .show(ui, |ui| self.detail_ui(ui, false, "关闭"));
+                side_panels += shown.response.rect.width();
             } else {
                 // 窄屏：右侧栏会把结果表挤得不可用，改为底部详情面板。
                 let detail_height = (ui.available_height() * 0.62).clamp(180.0, 560.0);
@@ -2895,6 +2717,7 @@ impl LltApp {
                     .show(ui, |ui| self.detail_ui(ui, true, "关闭"));
             }
         }
+        set_side_panels_width(ui, side_panels);
 
         // 横屏：改成左右两栏——左栏标签 + 控件 + 动作，右栏只放结果表。
         if landscape && !touch_page {
@@ -3945,34 +3768,25 @@ fn header_ui(
     ui.label(meta(state.open.clone()).weak());
 }
 
-/// 停站表：车站 / 到达 / 发车 / 里程 / 天。
-/// 停站表。返回被点中的车站名（只有站名字形是入口，其余单元格不响应点击）。
+/// 停站表要占多宽：列比可用宽度窄时就是可用宽度（铺满），否则是各列自然宽度之和。
+fn stops_table_width(ui: &Ui, custom: Option<&[columns::StopColumn]>, content_width: f32) -> f32 {
+    let specs = table_specs(
+        custom,
+        columns::StopColumn::auto,
+        columns::StopColumn::spec,
+        content_width,
+    );
+    let (_, total) = column_widths(&specs, content_width, ui.spacing().item_spacing.x);
+    total
+}
+
 /// 停站表。
 ///
 /// 列由「设置 → 表格列」决定（`custom = None` 时按宽度自动挑：窄屏先收起里程）。
 /// 这里**只画表**、不自己建滚动区：窄屏整页由外层的两向滚动块管，宽屏右栏和桌面侧栏
 /// 由调用方包一层 [`scrollable_table`]。`content_width` 是外层给的内容宽度，
 /// 列比它宽时表格就按内容宽度画，横着滑。
-fn stop_specs(
-    custom: Option<&[columns::StopColumn]>,
-    content_width: f32,
-) -> Vec<columns::Spec<columns::StopColumn>> {
-    match custom {
-        Some(picked) => picked.iter().map(|column| column.spec()).collect(),
-        None => columns::StopColumn::auto(content_width)
-            .iter()
-            .map(|column| column.spec())
-            .collect(),
-    }
-}
-
-/// 停站表要占多宽：列比可用宽度窄时就是可用宽度（铺满），否则是各列自然宽度之和。
-fn stops_table_width(ui: &Ui, custom: Option<&[columns::StopColumn]>, content_width: f32) -> f32 {
-    let specs = stop_specs(custom, content_width);
-    let (_, total) = column_widths(&specs, content_width, ui.spacing().item_spacing.x);
-    total
-}
-
+/// 返回被点中的车站名（只有站名字形是入口，其余单元格不响应点击）。
 fn stops_table_ui(
     ui: &mut Ui,
     stops: &[Stop],
@@ -3980,7 +3794,7 @@ fn stops_table_ui(
     content_width: f32,
 ) -> Option<String> {
     use columns::StopColumn as Col;
-    let specs: Vec<columns::Spec<Col>> = stop_specs(custom, content_width);
+    let specs: Vec<columns::Spec<Col>> = table_specs(custom, Col::auto, Col::spec, content_width);
     let spacing = ui.spacing().item_spacing.x;
     let (widths, _) = column_widths(&specs, content_width, spacing);
     let width = content_width;
@@ -3995,7 +3809,14 @@ fn stops_table_ui(
         Layout::top_down(Align::Min),
         |ui| {
             let header_top = ui.cursor().top();
-            let mut widths = table_widths(ui, "train_stops", &specs, widths, Col::key);
+            let mut widths = table_widths(
+                ui,
+                "train_stops",
+                &specs,
+                widths,
+                Col::key,
+                column_viewport(ui),
+            );
             apply_resize_drag(ui, "train_stops", &specs, &mut widths, Col::resizable);
             let active = table_active_column(ui, "train_stops");
             let table = exact_columns(
@@ -5682,7 +5503,7 @@ fn scrollable_table<R>(
     salt: impl std::hash::Hash + std::fmt::Debug,
     height: f32,
     header_height: f32,
-    build: impl FnOnce(&mut Ui, f32) -> R,
+    build: impl FnOnce(&mut Ui) -> R,
 ) -> R {
     // 滚动条做成「浮动 + 细」：平时不占位、几乎看不见，拖动时才浮出来一点。
     // 注意必须**继承**当前 style 再改宽度：新建一份 `ScrollStyle::floating()`
@@ -5704,7 +5525,7 @@ fn scrollable_table<R>(
                     Layout::top_down(Align::Min),
                     |ui| {
                         let header_top = ui.cursor().top();
-                        let value = build(ui, width);
+                        let value = build(ui);
                         paint_header_line(ui, header_top, header_height);
                         value
                     },
@@ -5750,6 +5571,119 @@ fn exact_columns<'a>(mut table: TableBuilder<'a>, widths: &[f32]) -> TableBuilde
         table = table.column(Column::exact(*width));
     }
     table
+}
+
+/// 列集合：设置里挑过就按挑的来，否则按布局宽度自动挑（见 [`table_layout_width`]）。
+fn table_specs<C: Copy>(
+    custom: Option<&[C]>,
+    auto: impl FnOnce(f32) -> Vec<C>,
+    spec: fn(C) -> columns::Spec<C>,
+    width: f32,
+) -> Vec<columns::Spec<C>> {
+    let picked = match custom {
+        Some(picked) => picked.to_vec(),
+        None => auto(width),
+    };
+    picked.iter().map(|column| spec(*column)).collect()
+}
+
+/// 结果表的行参数：车次 / 车站 / 站站三张表的行状态是同一套，只有列与每格内容不同。
+struct ResultRows<'a> {
+    /// 数据行数。
+    count: usize,
+    /// 「当日开行」的行数：它之后的行算不开行（上面加一条横线）。
+    running: usize,
+    /// 选中行的车次下标（与 `id` 的返回值比）。
+    selected: Option<i64>,
+    /// 第 `index` 行对应的车次下标：选中与点击都用它，调用方不必再翻译一次。
+    id: &'a dyn Fn(usize) -> i64,
+}
+
+/// 一张结果表：列宽（含拖动 / 记忆）、表头换序与分隔线、行高与点击。
+///
+/// 三张结果表本来各抄了一遍这段骨架，差别只在「列集合」和「每格画什么」——
+/// 这里只留一份：`cell` 画一格，返回被点中的车次下标。
+///
+/// 自适应列宽按 [`table_layout_width`]（不含右侧临时面板）算：打开、关闭详情时
+/// 表格只会多出横向滚动，列与列宽都不动。
+fn result_table<C: Copy>(
+    ui: &mut Ui,
+    salt: &str,
+    specs: &[columns::Spec<C>],
+    key: fn(C) -> &'static str,
+    resizable: fn(C) -> bool,
+    rows: ResultRows<'_>,
+    mut cell: impl FnMut(&mut egui_extras::TableRow<'_, '_>, C, usize),
+) -> Option<i64> {
+    let layout = table_layout_width(ui);
+    let spacing = ui.spacing().item_spacing.x;
+    let pitch = theme::list_row_height() + ui.spacing().item_spacing.y;
+    let height = theme::list_header_height() + rows.count as f32 * pitch + theme::GAP_S;
+    let mut clicked = None;
+    scrollable_table(ui, salt, height, theme::list_header_height(), |ui| {
+        let (computed, _) = column_widths(specs, layout, spacing);
+        let mut widths = table_widths(ui, salt, specs, computed, key, column_viewport_of(layout));
+        apply_resize_drag(ui, salt, specs, &mut widths, resizable);
+        let active = table_active_column(ui, salt);
+        let table = exact_columns(
+            TableBuilder::new(ui)
+                .id_salt(salt)
+                .striped(true)
+                .sense(Sense::click())
+                .drag_to_scroll(egui::scroll_area::DragScroll::Never)
+                .auto_shrink([false, false])
+                .cell_layout(cell_layout()),
+            &widths,
+        );
+        // 单元格右边界直接取自表头实际画出来的位置：滚动、内边距都由它兜底，
+        // 不用自己拿宽度累加（累加对不上只会在滚动时偏几十点）。
+        let mut edges: Vec<f32> = Vec::with_capacity(specs.len());
+        let mut cells: Vec<egui::Rect> = Vec::with_capacity(specs.len());
+        let mut first_row: Option<egui::Rect> = None;
+        table
+            .header(theme::list_header_height(), |mut header| {
+                for (index, spec) in specs.iter().enumerate() {
+                    header.col(|ui| {
+                        edges.push(ui.max_rect().right());
+                        cells.push(ui.max_rect());
+                        column_head(ui, spec, active == Some(index));
+                    });
+                }
+            })
+            .body(|body| {
+                body.rows(theme::list_row_height(), rows.count, |mut row| {
+                    let index = row.index();
+                    let id = (rows.id)(index);
+                    row.set_selected(rows.selected == Some(id));
+                    if rows.running > 0 && index == rows.running {
+                        row.set_overline(true);
+                    }
+                    for spec in specs {
+                        cell(&mut row, spec.column, index);
+                    }
+                    if index == 0 {
+                        first_row = Some(row.response().rect);
+                    }
+                    if row.response().clicked() {
+                        clicked = Some(id);
+                    }
+                });
+            });
+        table_header_drag(ui, salt, specs, &cells, key, resizable);
+        table_resize_handles(
+            ui,
+            salt,
+            specs,
+            &mut widths,
+            TableGeometry {
+                edges: &edges,
+                first_row,
+                header_height: theme::list_header_height(),
+            },
+            resizable,
+        );
+    });
+    clicked
 }
 
 /// 有「列宽记忆」的四张表：配置里按 od / train / station / stops 分开存，
@@ -5817,13 +5751,15 @@ fn seed_column_widths(ctx: &egui::Context, widths: &config::ColumnWidths) {
 ///
 /// 首次、可视宽度变化、列集合变化时按内容重算；其余时候保留用户拖出来的宽度
 /// （存在 egui 界面状态里，按 `salt` 区分；也会写进配置，下次启动照旧）。
-/// `computed` 是这一帧算出的自适应宽度。
+/// `computed` 是这一帧算出的自适应宽度；`viewport` 是这帧按哪份宽度量的
+/// （结果表用 [`table_layout_width`]，见那里的说明）。
 fn table_widths<C: Copy>(
     ui: &Ui,
     salt: &str,
     specs: &[columns::Spec<C>],
     computed: Vec<f32>,
     key: fn(C) -> &'static str,
+    viewport: i32,
 ) -> Vec<f32> {
     let id = egui::Id::unique((salt, "widths"));
     let keys_id = egui::Id::unique((salt, "widths_keys"));
@@ -5833,7 +5769,6 @@ fn table_widths<C: Copy>(
     ui.data_mut(|data| data.insert_temp(keys_id, keys.clone()));
     // 启动时从配置恢复的那一份：只有「按同一套布局量的」才认，认完就清掉标记，
     // 之后窗口尺寸再变照旧重新自适应。
-    let viewport = column_viewport(ui);
     let seeded = ui.data(|data| {
         data.get_temp::<i32>(seeded_id)
             .is_some_and(|saved| (saved - viewport).abs() <= VIEWPORT_SLACK)
@@ -5842,7 +5777,7 @@ fn table_widths<C: Copy>(
                 .is_some_and(|widths| widths.len() == specs.len())
     });
     ui.data_mut(|data| data.remove::<i32>(seeded_id));
-    let changed = column_layout_changed(ui, salt);
+    let changed = column_layout_changed(ui, salt, viewport);
     let stored: Option<Vec<f32>> = ui.data(|data| data.get_temp(id));
     let stored = stored.filter(|widths| widths.len() == specs.len());
     let stored = stored.and_then(|widths| {
@@ -6159,7 +6094,32 @@ fn table_resize_handles<C: Copy>(
 
 /// 表格的可视宽度。只在窗口 / 面板尺寸变化时变，滚动条、列宽拖动的变化不算。
 fn column_viewport(ui: &Ui) -> i32 {
-    (ui.clip_rect().width() * 2.0).round() as i32
+    column_viewport_of(ui.clip_rect().width())
+}
+
+/// 把一份宽度换成列宽记忆里用的整数口径（逻辑点 ×2，避免亚像素抖动）。
+fn column_viewport_of(width: f32) -> i32 {
+    (width * 2.0).round() as i32
+}
+
+/// 结果表的「布局宽度」：当前可用宽度加上右侧临时面板（详情栏 / 经由分栏）占掉的那段。
+///
+/// 打开、关闭详情时结果表只是多出横向滚动条；列集合与列宽都不该跟着重排——
+/// 否则同一块地方三张表各变各的（站站表列多、常常本来就要横滚，看上去反而没变）。
+/// `body` 铺完这两块分栏后把它们的宽度记下来，这里加回去。
+fn table_layout_width(ui: &Ui) -> f32 {
+    let side: f32 = ui
+        .data(|data| data.get_temp(egui::Id::unique("side_panels_width")))
+        .unwrap_or(0.0);
+    ui.available_width() + side
+}
+
+fn set_side_panels_width(ui: &Ui, width: f32) {
+    // 每帧都写：`body` 里先清零，铺完右侧分栏再加；不写会读到上一帧的旧值。
+    let id = egui::Id::unique("side_panels_width");
+    ui.data_mut(|data| {
+        data.insert_temp(id, width);
+    });
 }
 
 /// 可视宽度变了多少才算「换了布局」（逻辑点 ×2）。
@@ -6174,8 +6134,7 @@ const VIEWPORT_SLACK: i32 = 32;
 ///
 /// 判据不用内容宽度：拖动列宽或出现滚动条都会改变内容宽度，那会把用户刚拖好的
 /// 列宽又重置掉。
-fn column_layout_changed(ui: &Ui, salt: &str) -> bool {
-    let viewport = column_viewport(ui);
+fn column_layout_changed(ui: &Ui, salt: &str, viewport: i32) -> bool {
     let id = egui::Id::unique(("table_viewport", salt));
     let changed = ui
         .data(|data| data.get_temp::<i32>(id))
